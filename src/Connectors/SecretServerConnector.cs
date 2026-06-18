@@ -313,6 +313,39 @@ public sealed class SecretServerConnector
 
     // ---- Delete (revert; tool-created items only - caller enforces) ----
 
+    /// <summary>
+    /// List ALL folders (id, name, parentFolderId) by paging through /folders. Used to build
+    /// an in-memory folder map so we reuse existing folders instead of creating duplicates.
+    /// </summary>
+    public async Task<List<(long Id, string Name, long ParentId)>> ListAllFoldersAsync(CancellationToken ct = default)
+    {
+        var all = new List<(long, string, long)>();
+        var skip = 0;
+        while (true)
+        {
+            var req = SsRequest(HttpMethod.Get, $"/folders?take=1000&skip={skip}");
+            using var resp = await _http.SendAsync(req, ct);
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) break;
+            var body = await EnsureOk(resp, "GET", "/folders", ct);
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("records", out var records)) break;
+            var count = 0;
+            foreach (var rec in records.EnumerateArray())
+            {
+                count++;
+                if (!rec.TryGetProperty("id", out var idEl) || !idEl.TryGetInt64(out var id)) continue;
+                var name = rec.TryGetProperty("folderName", out var fn) ? fn.GetString() ?? "" : "";
+                var parent = rec.TryGetProperty("parentFolderId", out var pp) && pp.TryGetInt64(out var pid)
+                    ? pid : -1;
+                all.Add((id, name, parent));
+            }
+            var hasNext = doc.RootElement.TryGetProperty("hasNext", out var hn) && hn.ValueKind == JsonValueKind.True;
+            if (!hasNext || count == 0) break;
+            skip += count;
+        }
+        return all;
+    }
+
     public async Task<bool> DeleteSecretAsync(long secretId, CancellationToken ct = default)
     {
         var req = SsRequest(HttpMethod.Delete, $"/secrets/{secretId}");

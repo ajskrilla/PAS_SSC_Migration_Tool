@@ -152,7 +152,30 @@ export const api = {
   cancelJob: (jobId: string) =>
     fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" })
       .then((r) => r.json() as Promise<{ cancelled?: boolean; message?: string }>),
+
+  migrationStatus: (engagementId: string) =>
+    fetch(`/api/engagements/${engagementId}/migration-status`)
+      .then(json<MigrationStatus>),
 };
+
+export interface MigrationStatusRow {
+  item_type: string;
+  total: number;
+  migrated: number;
+  failed: number;
+  pending: number;
+}
+export interface MigrationStatusItem {
+  item_type: string;
+  name: string | null;
+  source_native_id: string;
+  target_native_id: string | null;
+  status: string | null;
+}
+export interface MigrationStatus {
+  summary: MigrationStatusRow[];
+  items: MigrationStatusItem[];
+}
 
 export interface LogRow {
   occurred_at: string;

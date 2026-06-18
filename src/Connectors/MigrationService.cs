@@ -61,15 +61,25 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
                 : input.StagingFolderName!;
             long stagingId = 0;
             if (!input.DryRun)
+            {
                 stagingId = await ss.EnsureFolderAsync(stagingName, -1, ct);
+                // Persist the staging folder id so Revert can delete the whole tree later.
+                await db.ExecuteAsync(
+                    @"UPDATE migration_job SET params = jsonb_set(
+                        COALESCE(params,'{}'::jsonb), '{stagingFolderId}', to_jsonb(@sid::bigint))
+                      WHERE id=@jid", new { sid = stagingId, jid = jobId });
+            }
             await Log(engagementId, jobId, "user_action", action: $"staging folder '{stagingName}'",
                 outcome: input.DryRun ? "planned" : "ready");
 
             // Load the selected source items from the latest source snapshot.
             var sourceItems = await LoadSourceItems(engagementId, input, ct);
 
-            // Folder cache: source folder_path -> target folder id (under staging).
+            // Folder cache: maps a path key -> target folder id. Pre-load EVERY existing folder
+            // under staging so re-runs REUSE folders instead of creating duplicates.
             var folderCache = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            if (!input.DryRun && stagingId > 0)
+                await PreloadFolderCache(ss, stagingId, folderCache, ct);
 
             foreach (var si in sourceItems)
             {
@@ -283,21 +293,71 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             new { e = engagementId })).ToList();
 
         var res = new RevertResult();
+        // 1) Delete the tracked secrets first (so counts reflect actual tool-created secrets).
         foreach (var c in created)
         {
             if (!long.TryParse(c.id, out var tid)) continue;
             var ok = await ss.DeleteSecretAsync(tid, ct);
             if (ok) res.Deleted++; else res.Failed++;
         }
+
+        // 2) Delete the staging folder(s) this engagement's jobs created. Deleting a folder in
+        //    Secret Server cascades to its subfolders AND any secrets inside - so this cleans up
+        //    the entire mirrored tree, including duplicates from earlier partial runs.
+        var stagingIds = (await db.QueryAsync<long?>(
+            @"SELECT (params->>'stagingFolderId')::bigint FROM migration_job
+              WHERE engagement_id=@e AND params ? 'stagingFolderId'",
+            new { e = engagementId }))
+            .Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToList();
+
+        foreach (var fid in stagingIds)
+        {
+            var ok = await ss.DeleteFolderAsync(fid, ct);
+            if (ok) res.FoldersDeleted++; else res.Failed++;
+            await Log(engagementId, null, "user_action",
+                action: $"revert staging folder #{fid}", outcome: ok ? "deleted" : "failed");
+        }
+
         // Clear target ids so the items can be re-migrated cleanly.
         await db.ExecuteAsync(
             "UPDATE migration_item SET target_native_id=NULL, status='pending' WHERE engagement_id=@e",
             new { e = engagementId });
-        await Log(engagementId, null, "user_action", action: "revert", outcome: $"deleted {res.Deleted}, failed {res.Failed}");
+        await Log(engagementId, null, "user_action", action: "revert",
+            outcome: $"deleted {res.Deleted} secrets, {res.FoldersDeleted} folders, failed {res.Failed}");
         return res;
     }
 
     // ---- helpers ----
+
+    /// <summary>
+    /// List every folder once and populate the cache with the relative path (under staging)
+    /// -> folder id for all descendants of the staging folder. This makes re-runs REUSE the
+    /// existing folder tree instead of creating duplicates (the path keys here match exactly
+    /// the running-path keys built in EnsureFolderPath: slash-joined, relative to staging).
+    /// </summary>
+    private static async Task PreloadFolderCache(
+        SecretServerConnector ss, long stagingId, Dictionary<string, long> cache, CancellationToken ct)
+    {
+        var all = await ss.ListAllFoldersAsync(ct);
+        // Index by parent for a downward walk from staging.
+        var byParent = all.GroupBy(f => f.ParentId)
+                          .ToDictionary(g => g.Key, g => g.ToList());
+
+        // BFS from staging's direct children, accumulating the relative path.
+        var queue = new Queue<(long Id, string Path)>();
+        if (byParent.TryGetValue(stagingId, out var roots))
+            foreach (var c in roots) queue.Enqueue((c.Id, c.Name));
+
+        while (queue.Count > 0)
+        {
+            var (id, path) = queue.Dequeue();
+            // First writer wins; if a duplicate same-path folder exists, we reuse the first.
+            if (!cache.ContainsKey(path)) cache[path] = id;
+            if (byParent.TryGetValue(id, out var kids))
+                foreach (var k in kids)
+                    queue.Enqueue((k.Id, $"{path}/{k.Name}"));
+        }
+    }
 
     private async Task<long> EnsureFolderPath(
         SecretServerConnector ss, long stagingId, string? sourcePath,
@@ -445,4 +505,4 @@ public sealed class MigrationJobResult
 
 public sealed record ExcludedItem(string SourceNativeId, string? Name, string Reason, string Detail);
 
-public sealed class RevertResult { public int Deleted { get; set; } public int Failed { get; set; } }
+public sealed class RevertResult { public int Deleted { get; set; } public int FoldersDeleted { get; set; } public int Failed { get; set; } }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   api, type Engagement, type SourceItemRow, type MigrateConnection,
-  type MigrationJobResult, type MigrationReport,
+  type MigrationJobResult, type MigrationReport, type MigrationStatus,
 } from "../lib/api";
 
 type JobType = "text_secret" | "file_secret" | "account_unmanage_export" | "full";
@@ -38,6 +38,15 @@ export function Migration() {
   const [msg, setMsg] = useState<string | null>(null);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
+  const [status, setStatus] = useState<MigrationStatus | null>(null);
+
+  const loadStatus = (eng: string) => {
+    if (!eng) { setStatus(null); return; }
+    api.migrationStatus(eng).then(setStatus).catch(() => setStatus(null));
+  };
+  // Refresh the delta whenever the engagement changes or a run finishes.
+  useEffect(() => { loadStatus(engagementId); }, [engagementId]);
+  useEffect(() => { if (!running) loadStatus(engagementId); }, [running]);
 
   // While a migration is in flight, poll for the running job id so we can offer Abort.
   useEffect(() => {
@@ -259,6 +268,41 @@ export function Migration() {
           </div>
         )}
       </div>
+
+      {/* Migration status / delta */}
+      {status && status.summary.length > 0 && (
+        <div className="panel">
+          <div className="page-head" style={{ marginBottom: 10 }}>
+            <h2 style={{ margin: 0 }}>Migration status</h2>
+            <button className="btn ghost small" onClick={() => loadStatus(engagementId)}>Refresh</button>
+          </div>
+          <table className="data">
+            <thead>
+              <tr><th>Type</th><th>Total</th><th>Migrated</th><th>Pending</th><th>Failed</th><th>Progress</th></tr>
+            </thead>
+            <tbody>
+              {status.summary.map((s) => {
+                const pct = s.total > 0 ? Math.round((s.migrated / s.total) * 100) : 0;
+                return (
+                  <tr key={s.item_type}>
+                    <td>{s.item_type}</td>
+                    <td>{s.total}</td>
+                    <td><span className="tag ok">{s.migrated}</span></td>
+                    <td>{s.pending}</td>
+                    <td>{s.failed > 0 ? <span className="tag bad">{s.failed}</span> : "0"}</td>
+                    <td>
+                      <div className="progress-track">
+                        <div className="progress-fill" style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="muted" style={{ fontSize: 12 }}>{pct}%</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Report */}
       {report && report.items.length > 0 && (

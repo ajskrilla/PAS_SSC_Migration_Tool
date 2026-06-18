@@ -230,6 +230,8 @@ app.MapGet("/api/engagements/{id:guid}/source-items",
     });
 
 // Event log (audit + diagnostics): every tenant action with outcome and message.
+// Migration delta/status: how many of each item type are migrated vs pending vs failed.
+// Compares the latest source inventory against migration_item progress.
 app.MapGet("/api/engagements/{id:guid}/logs",
     async (Guid id, IDbConnection db, int? limit) =>
         Results.Ok(await db.QueryAsync(
@@ -256,6 +258,27 @@ app.MapPost("/api/jobs/{jobId:guid}/cancel",
         jobs.Cancel(jobId)
             ? Results.Ok(new { cancelled = true })
             : Results.NotFound(new { message = "Job not running (already finished or unknown)." }));
+
+// Migration delta: per-type counts of what's migrated vs pending, plus the item list.
+app.MapGet("/api/engagements/{id:guid}/migration-status",
+    async (Guid id, IDbConnection db) =>
+    {
+        var summary = await db.QueryAsync(
+            @"SELECT item_type,
+                     COUNT(*) AS total,
+                     COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated,
+                     COUNT(*) FILTER (WHERE status='failed') AS failed,
+                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','failed') AND target_native_id IS NULL) AS pending
+              FROM migration_item WHERE engagement_id=@id
+              GROUP BY item_type ORDER BY item_type",
+            new { id });
+        var items = await db.QueryAsync(
+            @"SELECT item_type, name, source_native_id, target_native_id, status
+              FROM migration_item WHERE engagement_id=@id
+              ORDER BY item_type, name LIMIT 1000",
+            new { id });
+        return Results.Ok(new { summary, items });
+    });
 
 app.Run();
 
