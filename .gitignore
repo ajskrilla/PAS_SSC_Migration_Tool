@@ -1,0 +1,17 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Node
+node_modules/
+dist/
+
+# Env / secrets - NEVER commit real credentials
+.env
+*.pem
+*.key
+
+# OS
+.DS_Store
+*.tsbuildinfo

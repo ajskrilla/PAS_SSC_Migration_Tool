@@ -1,0 +1,359 @@
+using System.Data;
+using System.Text.Json;
+using Dapper;
+
+namespace PasMigration.Connectors;
+
+/// <summary>
+/// Runs read-only inventory against a tenant and persists the result as an
+/// inventory_snapshot + inventory_item rows. Also builds the source/target
+/// reconciliation diff. No secret values are read or stored - metadata only.
+/// </summary>
+public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFactory)
+{
+    /// <summary>
+    /// Capture a full inventory for one tenant connection using session credentials.
+    /// Returns the snapshot id and a summary. Read-only.
+    /// </summary>
+    public async Task<InventoryRunResult> CaptureAsync(
+        Guid engagementId, RunInventoryInput input, CancellationToken ct)
+    {
+        var http = httpFactory.CreateClient("tenant");
+
+        // Resolve (or create) the tenant_connection row for this role.
+        var connId = await db.ExecuteScalarAsync<Guid>(
+            @"INSERT INTO tenant_connection
+                (engagement_id, role, system_type, base_url, platform_tenant, auth_mode, credential_ref)
+              VALUES (@EngagementId, @Role, @SystemType, @BaseUrl, NULL, @AuthMode, NULL)
+              ON CONFLICT (engagement_id, role) DO UPDATE SET
+                system_type = EXCLUDED.system_type,
+                base_url    = EXCLUDED.base_url,
+                auth_mode   = EXCLUDED.auth_mode
+              RETURNING id",
+            new
+            {
+                EngagementId = engagementId,
+                input.Role,
+                input.SystemType,
+                BaseUrl = input.BaseUrl,
+                input.AuthMode,
+            });
+
+        var items = new List<InvItem>();
+        if (input.SystemType == "pas")
+            items = await CapturePasAsync(http, input, ct);
+        else
+            items = await CaptureSecretServerAsync(http, input, ct);
+
+        // Summary counts for the snapshot.
+        var summary = new
+        {
+            accounts = items.Count(i => i.ItemType == "account"),
+            text_secrets = items.Count(i => i.ItemType == "text_secret"),
+            file_secrets = items.Count(i => i.ItemType == "file_secret"),
+            folders = items.Count(i => i.ItemType == "folder"),
+            managed = items.Count(i => i is { ItemType: "account", IsManaged: true }),
+            unmanaged = items.Count(i => i is { ItemType: "account", IsManaged: false }),
+            total = items.Count,
+        };
+
+        // Persist snapshot, then items, in a transaction.
+        var phase = input.Role == "source" ? "pre" : "pre"; // both source+target capture in pre-phase
+        var snapshotId = Guid.NewGuid();
+        // Dapper auto-opens/closes per call, but an explicit transaction needs an open
+        // connection. Open it ourselves before BeginTransaction.
+        if (db.State != ConnectionState.Open)
+        {
+            if (db is System.Data.Common.DbConnection dbc)
+                await dbc.OpenAsync(ct);
+            else
+                db.Open();
+        }
+        using (var tx = db.BeginTransaction())
+        {
+            await db.ExecuteAsync(
+                @"INSERT INTO inventory_snapshot
+                    (id, engagement_id, tenant_connection_id, phase, summary, status)
+                  VALUES (@Id, @Eng, @Conn, @Phase, @Summary::jsonb, 'completed')",
+                new
+                {
+                    Id = snapshotId,
+                    Eng = engagementId,
+                    Conn = connId,
+                    Phase = phase,
+                    Summary = JsonSerializer.Serialize(summary),
+                }, tx);
+
+            foreach (var it in items)
+            {
+                await db.ExecuteAsync(
+                    @"INSERT INTO inventory_item
+                        (snapshot_id, item_type, source_native_id, name, folder_path,
+                         parent_ref, is_managed, size_bytes, attributes)
+                      VALUES (@Snapshot, @ItemType, @NativeId, @Name, @FolderPath,
+                              @ParentRef, @IsManaged, @SizeBytes, @Attributes::jsonb)
+                      ON CONFLICT (snapshot_id, item_type, source_native_id) DO NOTHING",
+                    new
+                    {
+                        Snapshot = snapshotId,
+                        it.ItemType,
+                        NativeId = it.NativeId,
+                        it.Name,
+                        FolderPath = it.FolderPath,
+                        ParentRef = it.ParentRef,
+                        IsManaged = it.IsManaged,
+                        SizeBytes = it.SizeBytes,
+                        Attributes = JsonSerializer.Serialize(it.Attributes),
+                    }, tx);
+            }
+            tx.Commit();
+        }
+
+        return new InventoryRunResult(snapshotId, summary.total, summary.accounts,
+            summary.text_secrets, summary.file_secrets, summary.folders);
+    }
+
+    // ---- PAS capture ----
+    private static async Task<List<InvItem>> CapturePasAsync(
+        HttpClient http, RunInventoryInput input, CancellationToken ct)
+    {
+        var pas = new PasConnector(http, input.BaseUrl!, input.AppId!);
+        using var creds = new TenantCredentials
+            { ClientId = input.ClientId, ClientSecret = input.ClientSecret, Scope = input.Scope };
+        await pas.AuthenticateAsync(creds, ct);
+
+        var items = new List<InvItem>();
+
+        // Accounts: try the Server join; if it yields nothing, fall back to no-join.
+        var accounts = await pas.InventoryLocalAccountsAsync(ct);
+        if (accounts.Count == 0)
+            accounts = await pas.InventoryLocalAccountsNoJoinAsync(ct);
+        foreach (var r in accounts)
+        {
+            items.Add(new InvItem
+            {
+                ItemType = "account",
+                NativeId = Str(r, "ID"),
+                Name = Str(r, "User"),
+                FolderPath = Str(r, "ServerName") ?? Str(r, "ServerFQDN"),
+                IsManaged = Bool(r, "IsManaged"),
+                Attributes = r,
+            });
+        }
+
+        // Secrets: Type is Text or File.
+        var secrets = await pas.InventorySecretsAsync(ct);
+        foreach (var r in secrets)
+        {
+            var type = (Str(r, "Type") ?? "").Trim();
+            var isFile = string.Equals(type, "File", StringComparison.OrdinalIgnoreCase);
+            items.Add(new InvItem
+            {
+                ItemType = isFile ? "file_secret" : "text_secret",
+                NativeId = Str(r, "ID"),
+                Name = Str(r, "SecretName"),
+                FolderPath = Str(r, "ParentPath"),
+                SizeBytes = isFile ? Long(r, "SecretFileSize") : null,
+                Attributes = r,
+            });
+        }
+
+        // Folders: Phantom Sets.
+        var folders = await pas.InventoryFolderSetsAsync(ct);
+        foreach (var r in folders)
+        {
+            items.Add(new InvItem
+            {
+                ItemType = "folder",
+                NativeId = Str(r, "ID"),
+                Name = Str(r, "Name"),
+                FolderPath = Str(r, "ParentPath"),
+                Attributes = r,
+            });
+        }
+
+        return items;
+    }
+
+    // ---- Secret Server capture ----
+    private static async Task<List<InvItem>> CaptureSecretServerAsync(
+        HttpClient http, RunInventoryInput input, CancellationToken ct)
+    {
+        var ss = new SecretServerConnector(
+            http,
+            input.PlatformBaseUrl ?? input.BaseUrl!,
+            input.SecretServerBaseUrl ?? input.BaseUrl!,
+            input.AuthMode == "legacy_password"
+                ? SecretServerConnector.AuthMode.LegacyPassword
+                : SecretServerConnector.AuthMode.PlatformClientCredentials);
+
+        using var creds = new TenantCredentials
+            { ClientId = input.ClientId, ClientSecret = input.ClientSecret, Scope = input.Scope };
+        if (input.AuthMode == "legacy_password")
+            await ss.AuthenticateLegacyAsync(input.Username!, input.ClientSecret, ct);
+        else
+            await ss.AuthenticatePlatformAsync(creds, ct);
+
+        var items = new List<InvItem>();
+
+        var folders = await ss.InventoryFoldersAsync(ct);
+        foreach (var r in folders)
+            items.Add(new InvItem
+            {
+                ItemType = "folder",
+                NativeId = Str(r, "id"),
+                Name = Str(r, "folderName") ?? Str(r, "name"),
+                FolderPath = Str(r, "folderPath"),
+                Attributes = r,
+            });
+
+        var secrets = await ss.InventorySecretsAsync(ct);
+        foreach (var r in secrets)
+        {
+            // SS list doesn't always distinguish file vs text; default to text_secret.
+            items.Add(new InvItem
+            {
+                ItemType = "text_secret",
+                NativeId = Str(r, "id"),
+                Name = Str(r, "name"),
+                FolderPath = Str(r, "folderPath") ?? Str(r, "folderId"),
+                Attributes = r,
+            });
+        }
+
+        return items;
+    }
+
+    // ---- Reconciliation: diff the latest source vs target snapshot ----
+    public async Task<int> ReconcileAsync(Guid engagementId)
+    {
+        // Pull the most recent source and target snapshot ids.
+        var snaps = (await db.QueryAsync(
+            @"SELECT DISTINCT ON (tc.role) s.id, tc.role
+              FROM inventory_snapshot s
+              JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+              WHERE s.engagement_id = @engagementId
+              ORDER BY tc.role, s.captured_at DESC",
+            new { engagementId })).ToList();
+
+        Guid? sourceSnap = null, targetSnap = null;
+        foreach (var s in snaps)
+        {
+            if ((string)s.role == "source") sourceSnap = (Guid)s.id;
+            else if ((string)s.role == "target") targetSnap = (Guid)s.id;
+        }
+        if (sourceSnap is null) return 0;
+
+        var src = (await db.QueryAsync(
+            @"SELECT item_type, name, folder_path, id FROM inventory_item WHERE snapshot_id=@s",
+            new { s = sourceSnap })).ToList();
+        var tgt = targetSnap is null ? new List<dynamic>() : (await db.QueryAsync(
+            @"SELECT item_type, name, folder_path, id FROM inventory_item WHERE snapshot_id=@s",
+            new { s = targetSnap })).ToList();
+
+        // match key = item_type + lower(folder_path)+name
+        static string Key(string type, string? path, string? name) =>
+            $"{type}|{(path ?? "").ToLowerInvariant()}|{(name ?? "").ToLowerInvariant()}";
+
+        var tgtByKey = new Dictionary<string, dynamic>();
+        foreach (var t in tgt)
+            tgtByKey[Key((string)t.item_type, (string?)t.folder_path, (string?)t.name)] = t;
+
+        // Clear prior results for this engagement, then recompute.
+        await db.ExecuteAsync("DELETE FROM reconciliation_result WHERE engagement_id=@e",
+            new { e = engagementId });
+
+        var matchedTargetIds = new HashSet<Guid>();
+        var count = 0;
+        foreach (var s in src)
+        {
+            var key = Key((string)s.item_type, (string?)s.folder_path, (string?)s.name);
+            var hasMatch = tgtByKey.TryGetValue(key, out var t);
+            if (hasMatch) matchedTargetIds.Add((Guid)t.id);
+            await db.ExecuteAsync(
+                @"INSERT INTO reconciliation_result
+                    (engagement_id, item_type, match_key, source_item_id, target_item_id, match_status)
+                  VALUES (@e, @type, @key, @sid, @tid, @status)",
+                new
+                {
+                    e = engagementId,
+                    type = (string)s.item_type,
+                    key,
+                    sid = (Guid)s.id,
+                    tid = hasMatch ? (Guid?)t.id : null,
+                    status = hasMatch ? "matched" : "source_only",
+                });
+            count++;
+        }
+        // target_only: targets with no source match
+        foreach (var t in tgt)
+        {
+            if (matchedTargetIds.Contains((Guid)t.id)) continue;
+            await db.ExecuteAsync(
+                @"INSERT INTO reconciliation_result
+                    (engagement_id, item_type, match_key, source_item_id, target_item_id, match_status)
+                  VALUES (@e, @type, @key, NULL, @tid, 'target_only')",
+                new
+                {
+                    e = engagementId,
+                    type = (string)t.item_type,
+                    key = Key((string)t.item_type, (string?)t.folder_path, (string?)t.name),
+                    tid = (Guid)t.id,
+                });
+            count++;
+        }
+        return count;
+    }
+
+    // ---- helpers: defensive reads from row dictionaries (case-insensitive) ----
+    private static string? Str(Dictionary<string, object?> r, string key)
+    {
+        var v = Get(r, key);
+        return v?.ToString();
+    }
+    private static bool? Bool(Dictionary<string, object?> r, string key)
+    {
+        var v = Get(r, key);
+        return v switch { bool b => b, null => null, _ => bool.TryParse(v.ToString(), out var b) ? b : null };
+    }
+    private static long? Long(Dictionary<string, object?> r, string key)
+    {
+        var v = Get(r, key);
+        return v switch { long l => l, null => null, _ => long.TryParse(v.ToString(), out var l) ? l : null };
+    }
+    private static object? Get(Dictionary<string, object?> r, string key)
+    {
+        if (r.TryGetValue(key, out var v)) return v;
+        foreach (var kv in r) if (string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase)) return kv.Value;
+        return null;
+    }
+
+    private sealed class InvItem
+    {
+        public required string ItemType { get; init; }
+        public string? NativeId { get; init; }
+        public string? Name { get; init; }
+        public string? FolderPath { get; init; }
+        public string? ParentRef { get; init; }
+        public bool? IsManaged { get; init; }
+        public long? SizeBytes { get; init; }
+        public Dictionary<string, object?> Attributes { get; init; } = new();
+    }
+}
+
+/// <summary>Run-inventory request. Credentials in-body, used in memory, never stored.</summary>
+public sealed record RunInventoryInput(
+    string Role,            // source | target
+    string SystemType,      // pas | secret_server
+    string AuthMode,
+    string? BaseUrl,
+    string? PlatformBaseUrl,
+    string? SecretServerBaseUrl,
+    string? AppId,
+    string ClientId,
+    string ClientSecret,
+    string? Username,
+    string? Scope);
+
+public sealed record InventoryRunResult(
+    Guid SnapshotId, int Total, int Accounts, int TextSecrets, int FileSecrets, int Folders);

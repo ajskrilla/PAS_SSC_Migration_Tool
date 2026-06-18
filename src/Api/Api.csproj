@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>PasMigration.Api</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Embed PDBs so exception stack traces include file + line numbers even in Release. -->
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+  </PropertyGroup>
+
+  <!-- Modular monolith: sibling module folders compile into this single project. -->
+  <ItemGroup>
+    <Compile Include="../Connectors/**/*.cs" />
+    <Compile Include="../Core/**/*.cs" />
+    <Compile Include="../Inventory/**/*.cs" />
+    <Compile Include="../Migration/**/*.cs" />
+    <Compile Include="../Verification/**/*.cs" />
+    <Compile Include="../Ai/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="9.0.*" />
+    <PackageReference Include="Dapper" Version="2.1.*" />
+    <PackageReference Include="Hangfire.AspNetCore" Version="1.8.*" />
+    <PackageReference Include="Hangfire.PostgreSql" Version="1.20.*" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,263 @@
+using System.Data;
+using System.Security.Authentication;
+using Dapper;
+using Hangfire;
+using Hangfire.PostgreSql;
+using Npgsql;
+using PasMigration.Connectors;
+
+var builder = WebApplication.CreateBuilder(args);
+
+var connString = builder.Configuration.GetConnectionString("Postgres")
+    ?? throw new InvalidOperationException("ConnectionStrings:Postgres is required.");
+
+// Postgres connection factory (Dapper over Npgsql).
+builder.Services.AddScoped<IDbConnection>(_ => new NpgsqlConnection(connString));
+
+// HttpClient used for all tenant API calls. Enforce TLS 1.2+ per the PAS API requirements.
+builder.Services.AddHttpClient("tenant").ConfigurePrimaryHttpMessageHandler(() =>
+    new HttpClientHandler { SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 });
+
+builder.Services.AddScoped<ConnectionService>();
+builder.Services.AddScoped<InventoryService>();
+builder.Services.AddScoped<MigrationService>();
+// Session credential store: in-memory, 60-min sliding idle, cleared on restart.
+builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
+// Tracks running migration jobs so they can be aborted from the UI.
+builder.Services.AddSingleton<JobRegistry>();
+
+// Resumable background jobs (migration orchestrator) backed by Postgres.
+builder.Services.AddHangfire(cfg => cfg
+    .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+    .UseSimpleAssemblyNameTypeSerializer()
+    .UseRecommendedSerializerSettings()
+    .UsePostgreSqlStorage(o => o.UseNpgsqlConnection(connString)));
+builder.Services.AddHangfireServer();
+
+// App-level auth (OIDC/JWT). Configuration supplied via env in real deployments.
+builder.Services.AddAuthentication("Bearer").AddJwtBearer();
+builder.Services.AddAuthorization();
+
+// In production the SPA is served same-origin through the nginx reverse proxy, so CORS
+// isn't exercised by the browser. This policy only matters for cross-origin dev (e.g.
+// `npm run dev` on :5173). Origins are configurable via Cors:Origins (comma-separated).
+var corsOrigins = (builder.Configuration["Cors:Origins"] ?? "http://localhost:5173")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
+    p.WithOrigins(corsOrigins).AllowAnyHeader().AllowAnyMethod()));
+
+var app = builder.Build();
+
+app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
+
+// Liveness/readiness. Readiness pings the DB.
+app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+app.MapGet("/health/ready", async (IDbConnection db) =>
+{
+    try { await db.ExecuteScalarAsync("SELECT 1"); return Results.Ok(new { status = "ready" }); }
+    catch (Exception ex) { return Results.Problem($"db not ready: {ex.Message}"); }
+});
+
+// First real read endpoint: list engagements (proves DB wiring end-to-end).
+app.MapGet("/api/engagements", async (IDbConnection db) =>
+{
+    var rows = await db.QueryAsync(
+        "SELECT id, name, customer_name, status, created_at FROM engagement ORDER BY created_at DESC");
+    return Results.Ok(rows);
+});
+
+app.MapPost("/api/engagements", async (IDbConnection db, CreateEngagement input) =>
+{
+    var id = await db.ExecuteScalarAsync<Guid>(
+        @"INSERT INTO engagement (name, customer_name) VALUES (@Name, @CustomerName)
+          RETURNING id",
+        new { input.Name, input.CustomerName });
+    return Results.Created($"/api/engagements/{id}", new { id });
+});
+
+// ---- Tenant connections (metadata only; credentials never persisted) ----
+
+app.MapGet("/api/engagements/{id:guid}/connections",
+    async (Guid id, ConnectionService svc) => Results.Ok(await svc.ListAsync(id)));
+
+app.MapPut("/api/engagements/{id:guid}/connections",
+    async (Guid id, ConnectionInput input, ConnectionService svc) =>
+        Results.Ok(new { id = await svc.UpsertAsync(id, input) }));
+
+// Live auth handshake. On success, cache credentials in the session vault so subsequent
+// inventory/migration actions don't require re-entry. Credentials stay in memory only.
+app.MapPost("/api/connections/test",
+    async (TestConnectionInput input, ConnectionService svc, CredentialVault vault, CancellationToken ct) =>
+    {
+        var result = await svc.TestAsync(input, ct);
+        if (result.Success && input.EngagementId is { } eng && input.Role is { } role)
+        {
+            vault.Put(eng, role, new SessionCredentials(
+                input.SystemType, input.AuthMode, input.BaseUrl, input.PlatformBaseUrl,
+                input.SecretServerBaseUrl, input.AppId, input.ClientId, input.ClientSecret,
+                input.Username, input.Scope));
+        }
+        return result.Success ? Results.Ok(result) : Results.BadRequest(result);
+    });
+
+// Which roles currently have active session credentials (for the UI badge).
+app.MapGet("/api/engagements/{id:guid}/credentials/status",
+    (Guid id, CredentialVault vault) =>
+        Results.Ok(new { source = vault.Has(id, "source"), target = vault.Has(id, "target") }));
+
+// Explicit sign-out: forget session credentials for this engagement.
+app.MapPost("/api/engagements/{id:guid}/credentials/clear",
+    (Guid id, CredentialVault vault) => { vault.Clear(id); return Results.Ok(new { cleared = true }); });
+
+// ---- Inventory (read-only) ----
+
+// Run a full inventory capture for one tenant role using session credentials.
+app.MapPost("/api/engagements/{id:guid}/inventory/run",
+    async (Guid id, RunInventoryInput input, InventoryService svc, CancellationToken ct) =>
+    {
+        try { return Results.Ok(await svc.CaptureAsync(id, input, ct)); }
+        catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
+    });
+
+// Recompute the source/target reconciliation diff.
+app.MapPost("/api/engagements/{id:guid}/reconcile",
+    async (Guid id, InventoryService svc) =>
+        Results.Ok(new { count = await svc.ReconcileAsync(id) }));
+
+// Latest snapshot summaries per role (for dashboard cards).
+app.MapGet("/api/engagements/{id:guid}/inventory/summary",
+    async (Guid id, IDbConnection db) =>
+    {
+        var rows = await db.QueryAsync(
+            @"SELECT DISTINCT ON (tc.role) tc.role, s.id AS snapshot_id, s.captured_at,
+                     s.summary::text AS summary_json
+              FROM inventory_snapshot s
+              JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+              WHERE s.engagement_id = @id
+              ORDER BY tc.role, s.captured_at DESC",
+            new { id });
+
+        // Parse the JSONB (returned as text) into a real object so the client gets numbers.
+        var shaped = rows.Select(r =>
+        {
+            var d = (IDictionary<string, object?>)r;
+            var json = d.TryGetValue("summary_json", out var sj) ? sj as string : null;
+            object? summary = null;
+            if (!string.IsNullOrEmpty(json))
+                summary = System.Text.Json.JsonSerializer.Deserialize<
+                    System.Collections.Generic.Dictionary<string, int>>(json);
+            return new
+            {
+                role = d.TryGetValue("role", out var role) ? role : null,
+                snapshot_id = d.TryGetValue("snapshot_id", out var sid) ? sid : null,
+                captured_at = d.TryGetValue("captured_at", out var ca) ? ca : null,
+                summary,
+            };
+        });
+        return Results.Ok(shaped);
+    });
+
+// Inventory items for a snapshot (drill-down table).
+app.MapGet("/api/snapshots/{snapshotId:guid}/items",
+    async (Guid snapshotId, IDbConnection db, string? type) =>
+    {
+        var sql = @"SELECT item_type, source_native_id, name, folder_path, is_managed, size_bytes
+                    FROM inventory_item WHERE snapshot_id = @snapshotId"
+                  + (type is null ? "" : " AND item_type = @type")
+                  + " ORDER BY item_type, name";
+        return Results.Ok(await db.QueryAsync(sql, new { snapshotId, type }));
+    });
+
+// Reconciliation results (diff table).
+app.MapGet("/api/engagements/{id:guid}/reconciliation",
+    async (Guid id, IDbConnection db) =>
+        Results.Ok(await db.QueryAsync(
+            @"SELECT item_type, match_key, match_status FROM reconciliation_result
+              WHERE engagement_id = @id ORDER BY match_status, item_type",
+            new { id })));
+
+// ---- Migration (write; dry-run aware) ----
+
+// Run a migration job (text_secret | file_secret | account_unmanage_export | full).
+app.MapPost("/api/engagements/{id:guid}/migrate",
+    async (Guid id, MigrationRunInput input, MigrationService svc, CancellationToken ct) =>
+    {
+        try { return Results.Ok(await svc.RunAsync(id, input, ct)); }
+        catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
+    });
+
+// Revert: delete tool-created target items (lab testing). Requires explicit confirm=true.
+app.MapPost("/api/engagements/{id:guid}/revert",
+    async (Guid id, RevertRequest req, MigrationService svc, CancellationToken ct) =>
+    {
+        if (!req.Confirm)
+            return Results.BadRequest(new { message = "Revert requires confirm=true. This deletes migrated target data." });
+        try { return Results.Ok(await svc.RevertAsync(id, req.Connection, ct)); }
+        catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
+    });
+
+// Migration report: jobs + per-item outcomes + event timeline.
+app.MapGet("/api/engagements/{id:guid}/migration/report",
+    async (Guid id, IDbConnection db) =>
+    {
+        var jobs = await db.QueryAsync(
+            @"SELECT id, job_type, mode, status, started_at, finished_at, total, succeeded, failed, skipped
+              FROM migration_job WHERE engagement_id=@id ORDER BY started_at DESC", new { id });
+        var items = await db.QueryAsync(
+            @"SELECT item_type, source_name, source_folder_path, target_native_id, status, last_error
+              FROM migration_item WHERE engagement_id=@id ORDER BY item_type, source_name", new { id });
+        return Results.Ok(new { jobs, items });
+    });
+
+// Source items for the migration checklist (from latest source snapshot).
+app.MapGet("/api/engagements/{id:guid}/source-items",
+    async (Guid id, IDbConnection db, string? type) =>
+    {
+        var sql = @"SELECT ii.item_type, ii.source_native_id, ii.name, ii.folder_path, ii.is_managed
+                    FROM inventory_item ii
+                    JOIN inventory_snapshot s ON s.id = ii.snapshot_id
+                    JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+                    WHERE s.engagement_id=@id AND tc.role='source'
+                      AND s.captured_at = (
+                        SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                        JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+                        WHERE s2.engagement_id=@id AND tc2.role='source')"
+                  + (type is null ? "" : " AND ii.item_type=@type")
+                  + " ORDER BY ii.item_type, ii.name";
+        return Results.Ok(await db.QueryAsync(sql, new { id, type }));
+    });
+
+// Event log (audit + diagnostics): every tenant action with outcome and message.
+app.MapGet("/api/engagements/{id:guid}/logs",
+    async (Guid id, IDbConnection db, int? limit) =>
+        Results.Ok(await db.QueryAsync(
+            @"SELECT occurred_at, event_type, action, outcome, message, tenant_role
+              FROM event_log WHERE engagement_id=@id
+              ORDER BY occurred_at DESC LIMIT @lim",
+            new { id, lim = limit is > 0 and <= 1000 ? limit : 200 })));
+
+// The currently-running job for an engagement (so the UI can offer an abort button
+// even though the migrate request is still in flight).
+app.MapGet("/api/engagements/{id:guid}/running-job",
+    async (Guid id, IDbConnection db) =>
+    {
+        var job = await db.QueryFirstOrDefaultAsync(
+            @"SELECT id, job_type, mode, started_at FROM migration_job
+              WHERE engagement_id=@id AND status='running' ORDER BY started_at DESC LIMIT 1",
+            new { id });
+        return Results.Ok(job is null ? new { running = false } : new { running = true, job });
+    });
+
+// Abort a running migration job.
+app.MapPost("/api/jobs/{jobId:guid}/cancel",
+    (Guid jobId, JobRegistry jobs) =>
+        jobs.Cancel(jobId)
+            ? Results.Ok(new { cancelled = true })
+            : Results.NotFound(new { message = "Job not running (already finished or unknown)." }));
+
+app.Run();
+
+public record CreateEngagement(string Name, string CustomerName);
+public record RevertRequest(bool Confirm, MigrationRunInput Connection);
