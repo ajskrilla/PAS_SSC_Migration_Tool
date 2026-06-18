@@ -243,7 +243,9 @@ public sealed class SecretServerConnector
                            ?? new Dictionary<string, object?>();
                 var slug = it.TryGetProperty("slug", out var s) ? s.GetString() ?? "" : "";
                 var isFile = it.TryGetProperty("isFile", out var f) && f.ValueKind == JsonValueKind.True;
-                if (isFile && fileField is { } ff && slug == ff.Slug)
+                // For a file upload, fill the FIRST file-type item (matches the proven import
+                // script's `Where isFile` approach) rather than relying on a specific slug.
+                if (isFile && fileField is { } ff)
                 {
                     item["filename"] = ff.Filename;
                     item["itemValue"] = ff.Base64;

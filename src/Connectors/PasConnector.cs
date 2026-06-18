@@ -188,24 +188,68 @@ public sealed class PasConnector
     /// </summary>
     public async Task<byte[]> DownloadFileSecretAsync(string id, CancellationToken ct = default)
     {
-        var req1 = NewAuthedRequest(HttpMethod.Post, "/ServerManage/RequestSecretDownloadUrl");
-        req1.Content = JsonBody(new { secretID = id });
-        using var resp1 = await _http.SendAsync(req1, ct);
-        resp1.EnsureSuccessStatusCode();
-        using var doc = JsonDocument.Parse(await resp1.Content.ReadAsStringAsync(ct));
-        var result = doc.RootElement.GetProperty("Result");
+        // Step 1: request the download handle. Try {secretID} then fall back to {ID}.
+        JsonElement result = default;
+        var got = false;
+        foreach (var bodyObj in new object[] { new { secretID = id }, new { ID = id } })
+        {
+            var r1 = NewAuthedRequest(HttpMethod.Post, "/ServerManage/RequestSecretDownloadUrl");
+            r1.Content = JsonBody(bodyObj);
+            using var resp1 = await _http.SendAsync(r1, ct);
+            if (!resp1.IsSuccessStatusCode) continue;
+            using var doc = JsonDocument.Parse(await resp1.Content.ReadAsStringAsync(ct));
+            if (doc.RootElement.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False)
+                continue;
+            if (doc.RootElement.TryGetProperty("Result", out var res) && res.ValueKind == JsonValueKind.Object)
+            {
+                result = res.Clone();
+                got = true;
+                break;
+            }
+        }
+        if (!got)
+            throw new InvalidOperationException($"RequestSecretDownloadUrl failed for secret {id}.");
 
+        // Resolve the handle across the field names PAS versions use.
         string? handle = null;
-        foreach (var field in new[] { "Location", "DownloadUrl", "path" })
-            if (result.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.String)
+        foreach (var field in new[] { "Location", "DownloadUrl", "FileDownloadUrl", "Url", "path", "Path" })
+            if (result.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.String
+                && !string.IsNullOrEmpty(v.GetString()))
             { handle = v.GetString(); break; }
         if (handle is null)
-            throw new InvalidOperationException($"No download handle in response for secret {id}.");
+            throw new InvalidOperationException(
+                "No download handle in response. Result fields: " +
+                string.Join(", ", result.EnumerateObject().Select(p => p.Name)));
 
-        var req2 = NewAuthedRequest(HttpMethod.Post, $"/Core/DownloadFile?path={Uri.EscapeDataString(handle)}");
-        using var resp2 = await _http.SendAsync(req2, ct);
-        resp2.EnsureSuccessStatusCode();
-        return await resp2.Content.ReadAsByteArrayAsync(ct);
+        // Build the download target. If the handle is already absolute, use it directly;
+        // otherwise express it as a path relative to the tenant base (NewAuthedRequest prepends base).
+        string? absoluteUrl = null;
+        string relativePath;
+        if (handle.StartsWith("http://") || handle.StartsWith("https://")) { absoluteUrl = handle; relativePath = ""; }
+        else if (handle.StartsWith("/")) relativePath = handle;
+        else if (handle.Contains("DownloadFile")) relativePath = $"/{handle}";
+        else relativePath = $"/Core/DownloadFile?path={Uri.EscapeDataString(handle)}";
+
+        // Step 2: pull the bytes. Docs show POST; GET as fallback.
+        foreach (var method in new[] { HttpMethod.Post, HttpMethod.Get })
+        {
+            HttpRequestMessage r2;
+            if (absoluteUrl is not null)
+            {
+                r2 = new HttpRequestMessage(method, absoluteUrl);
+                EnsureToken();
+                r2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
+                r2.Headers.Add("X-CENTRIFY-NATIVE-CLIENT", "true");
+            }
+            else
+            {
+                r2 = NewAuthedRequest(method, relativePath);
+            }
+            using var resp2 = await _http.SendAsync(r2, ct);
+            if (resp2.IsSuccessStatusCode)
+                return await resp2.Content.ReadAsByteArrayAsync(ct);
+        }
+        throw new InvalidOperationException($"DownloadFile failed for secret {id}.");
     }
 
     /// <summary>

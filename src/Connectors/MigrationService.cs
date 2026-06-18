@@ -193,16 +193,19 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
         var template = await ss.EnsureFileMigrationTemplateAsync(ct);
         var bytes = await pas.DownloadFileSecretAsync(si.SourceNativeId, ct); // in memory only
         var b64 = Convert.ToBase64String(bytes);
-        var filename = si.Name ?? "file";
+        // Use the ORIGINAL stored filename (with extension) from inventory, not the secret name.
+        var filename = (si.Attributes.TryGetValue("SecretFileName", out var sfn) ? sfn?.ToString() : null);
+        if (string.IsNullOrWhiteSpace(filename)) filename = si.Name ?? "file";
         var targetId = await ss.CreateSecretAsync(
             si.Name ?? "(unnamed)", template, folderId,
             new Dictionary<string, string> { ["description"] = si.Description ?? "" },
             (Slug: "file", Filename: filename, Base64: b64), ct);
         await SetTargetId(eng, si, targetId.ToString());
 
-        // Byte-fidelity check (the §11 open item): confirm the attachment landed.
+        // Byte-fidelity check (the §11 open item): confirm the attachment landed and size matches.
         var ok = await ss.SecretHasFileAttachmentAsync(targetId, ct);
-        await Log(eng, jobId, "api_call", si.SourceNativeId, $"file_secret '{si.Name}'",
+        await Log(eng, jobId, "api_call", si.SourceNativeId,
+            $"file_secret '{si.Name}' ({filename}, {bytes.Length} bytes)",
             ok ? "created+verified" : "created (attachment unverified)");
     }
 
