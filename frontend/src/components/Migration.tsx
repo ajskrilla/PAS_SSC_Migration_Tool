@@ -4,23 +4,25 @@ import {
   type MigrationJobResult, type MigrationReport, type MigrationStatus, type TemplateOption,
 } from "../lib/api";
 
-type JobType = "text_secret" | "file_secret" | "account_unmanage_export" | "full";
+type JobType = "text_secret" | "file_secret" | "account_local" | "account_domain" | "full";
 
 const JOB_LABELS: Record<JobType, string> = {
   text_secret: "Text secrets",
   file_secret: "File secrets",
-  account_unmanage_export: "Local accounts",
+  account_local: "Local accounts",
+  account_domain: "Domain accounts",
   full: "Full migration (all types)",
 };
 
 const jobTypeToItemType = (j: JobType) =>
-  j === "account_unmanage_export" ? "account"
+  j === "account_local" || j === "account_domain" ? "account"
   : j === "full" ? undefined
   : j;
 
 const blankConn = (): MigrateConnection => ({
-  pasBaseUrl: "", pasAppId: "", pasClientId: "", pasClientSecret: "", pasScope: "",
-  ssBaseUrl: "", ssPlatformBaseUrl: "", ssSecretServerBaseUrl: "", ssClientId: "", ssClientSecret: "",
+  pasBaseUrl: "https://", pasAppId: "", pasClientId: "", pasClientSecret: "", pasScope: "",
+  ssBaseUrl: "", ssPlatformBaseUrl: "https://", ssSecretServerBaseUrl: "https://",
+  ssClientId: "", ssClientSecret: "",
 });
 
 export function Migration() {
@@ -118,7 +120,9 @@ export function Migration() {
   const loadItems = () => {
     if (!engagementId) return;
     const t = jobTypeToItemType(jobType);
-    api.sourceItems(engagementId, t).then((rows) => {
+    const scope = jobType === "account_local" ? "local"
+      : jobType === "account_domain" ? "domain" : undefined;
+    api.sourceItems(engagementId, t, scope).then((rows) => {
       setItems(rows);
       setSelected(new Set(rows.map((r) => r.source_native_id))); // default: all selected
     }).catch(() => setItems([]));
@@ -141,8 +145,14 @@ export function Migration() {
   const toggleAll = () =>
     setSelected(allSelected ? new Set() : new Set(items.map((r) => r.source_native_id)));
 
-  const cred = (k: keyof MigrateConnection, v: string) =>
+  const cred = (k: keyof MigrateConnection, v: string) => {
+    // For URL fields, collapse an accidental doubled scheme (e.g. pasting https://host
+    // on top of the pre-filled https:// -> https://https://host).
+    if (k.endsWith("BaseUrl")) {
+      v = v.replace(/^https:\/\/https:\/\//, "https://").replace(/^https:\/\/http:\/\//, "http://");
+    }
     setConn((c) => ({ ...c, [k]: v }));
+  };
 
   const run = async () => {
     setRunning(true); setResult(null); setMsg(null);

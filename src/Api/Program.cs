@@ -48,6 +48,22 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
 
 var app = builder.Build();
 
+// Idempotent schema fixups applied at startup (the docker-entrypoint-initdb.d migrations only
+// run on a fresh volume; this keeps an already-provisioned DB current).
+try
+{
+    using var fixupConn = new NpgsqlConnection(connString);
+    await fixupConn.OpenAsync();
+    await fixupConn.ExecuteAsync(@"
+        ALTER TABLE inventory_item DROP CONSTRAINT IF EXISTS inventory_item_item_type_check;
+        ALTER TABLE inventory_item ADD CONSTRAINT inventory_item_item_type_check
+            CHECK (item_type IN ('account','text_secret','file_secret','folder','multiplexed_account'));");
+}
+catch (Exception ex)
+{
+    app.Logger.LogWarning("Startup schema fixup skipped: {Message}", ex.Message);
+}
+
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -227,7 +243,7 @@ app.MapGet("/api/engagements/{id:guid}/migration/report",
 
 // Source items for the migration checklist (from latest source snapshot).
 app.MapGet("/api/engagements/{id:guid}/source-items",
-    async (Guid id, IDbConnection db, string? type) =>
+    async (Guid id, IDbConnection db, string? type, string? scope) =>
     {
         var sql = @"SELECT ii.item_type, ii.source_native_id, ii.name, ii.folder_path, ii.is_managed
                     FROM inventory_item ii
@@ -239,8 +255,10 @@ app.MapGet("/api/engagements/{id:guid}/source-items",
                         JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
                         WHERE s2.engagement_id=@id AND tc2.role='source')"
                   + (type is null ? "" : " AND ii.item_type=@type")
+                  // For accounts, optionally filter by scope (local|domain) read from attributes.
+                  + (scope is null ? "" : " AND ii.attributes->>'AccountScope' = @scope")
                   + " ORDER BY ii.item_type, ii.name";
-        return Results.Ok(await db.QueryAsync(sql, new { id, type }));
+        return Results.Ok(await db.QueryAsync(sql, new { id, type, scope }));
     });
 
 // Event log (audit + diagnostics): every tenant action with outcome and message.

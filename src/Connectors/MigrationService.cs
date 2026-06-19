@@ -104,6 +104,14 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             {
                 ct.ThrowIfCancellationRequested();
                 if (input.JobType != "full" && si.ItemType != JobTypeToItem(input.JobType)) continue;
+                // For scoped account jobs, only process the matching local/domain accounts.
+                if (si.ItemType == "account")
+                {
+                    var itemScope = (si.Attributes.TryGetValue("AccountScope", out var asc)
+                        ? asc?.ToString() : null) ?? "local";
+                    if (input.JobType == "account_local" && itemScope != "local") continue;
+                    if (input.JobType == "account_domain" && itemScope != "domain") continue;
+                }
 
                 await UpsertMigrationItem(jobId, engagementId, si);
                 try
@@ -317,7 +325,28 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
                 $"Account template '{templateName}' not found on target. Create it or adjust the name.");
 
         // Unmanage already happened above; checkout the now-static password (in memory only).
-        var (password, coid) = await pas.CheckoutPasswordAsync(si.SourceNativeId, ct);
+        string password;
+        string coid;
+        try
+        {
+            (password, coid) = await pas.CheckoutPasswordAsync(si.SourceNativeId, ct);
+        }
+        catch (Exception ex)
+        {
+            // The account was ALREADY unmanaged above but we couldn't get its password, so it
+            // exists in neither a managed-PAS nor a migrated state. Flag it loudly for remediation.
+            result.Excluded.Add(new ExcludedItem(si.SourceNativeId, secretName,
+                "unmanaged_but_not_migrated",
+                $"Unmanaged in PAS but password checkout failed: {ex.Message}. " +
+                "Needs manual attention (re-manage in PAS or migrate by hand)."));
+            result.Skipped++;
+            await SetItemStatus(eng, si, "skipped",
+                $"UNMANAGED BUT NOT MIGRATED - checkout failed: {ex.Message}");
+            await Log(eng, jobId, "api_call", si.SourceNativeId,
+                $"account '{secretName}'", "excluded",
+                $"UNMANAGED BUT NOT MIGRATED: {ex.Message}");
+            throw new MigrationSkip();
+        }
         try
         {
             // Field slugs differ slightly by template; CreateSecretAsync fills by slug and ignores
@@ -530,7 +559,9 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     {
         "text_secret" => "text_secret",
         "file_secret" => "file_secret",
-        "account_unmanage_export" => "account",
+        "account_local" => "account",
+        "account_domain" => "account",
+        "account_unmanage_export" => "account",  // legacy alias
         _ => jobType,
     };
 

@@ -136,10 +136,32 @@ public sealed class PasConnector
         req.Content = JsonBody(new { ID = accountId });
         using var resp = await _http.SendAsync(req, ct);
         resp.EnsureSuccessStatusCode();
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        var r = doc.RootElement.GetProperty("Result");
-        return (r.GetProperty("Password").GetString() ?? "",
-                r.GetProperty("COID").GetString() ?? "");
+        var bodyText = await resp.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(bodyText);
+        var root = doc.RootElement;
+
+        // A failed checkout returns success=false with the reason in Message (e.g. approval
+        // required, no managed password, account not checkout-able). Surface it clearly.
+        if (root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False)
+        {
+            var msg = root.TryGetProperty("Message", out var m) ? m.GetString() : null;
+            throw new InvalidOperationException(
+                $"PAS password checkout refused for account {accountId}: {msg ?? "no message"}");
+        }
+        if (!root.TryGetProperty("Result", out var r) || r.ValueKind == JsonValueKind.Null)
+            throw new InvalidOperationException(
+                $"PAS checkout for account {accountId} returned no Result. Body: " +
+                (bodyText.Length > 300 ? bodyText[..300] : bodyText));
+
+        var pw = r.TryGetProperty("Password", out var p) && p.ValueKind == JsonValueKind.String
+            ? p.GetString() ?? "" : null;
+        if (pw is null)
+            throw new InvalidOperationException(
+                $"PAS checkout for account {accountId} returned no Password. Result fields: " +
+                string.Join(", ", r.EnumerateObject().Select(x => x.Name)));
+        var coid = r.TryGetProperty("COID", out var c) && c.ValueKind == JsonValueKind.String
+            ? c.GetString() ?? "" : "";
+        return (pw, coid);
     }
 
     /// <summary>Check a password back in using the checkout id (COID).</summary>

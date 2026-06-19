@@ -47,7 +47,7 @@ CREATE TABLE inventory_item (
     id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     snapshot_id      UUID NOT NULL REFERENCES inventory_snapshot(id) ON DELETE CASCADE,
     item_type        TEXT NOT NULL
-                     CHECK (item_type IN ('account','text_secret','file_secret','folder')),
+                     CHECK (item_type IN ('account','text_secret','file_secret','folder','multiplexed_account')),
     source_native_id TEXT NOT NULL,
     name             TEXT NOT NULL,
     folder_path      TEXT,

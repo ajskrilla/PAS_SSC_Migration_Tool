@@ -113,9 +113,14 @@ export const api = {
   reconciliation: (engagementId: string) =>
     fetch(`/api/engagements/${engagementId}/reconciliation`).then(json<ReconRow[]>),
 
-  sourceItems: (engagementId: string, type?: string) =>
-    fetch(`/api/engagements/${engagementId}/source-items${type ? `?type=${type}` : ""}`)
-      .then(json<SourceItemRow[]>),
+  sourceItems: (engagementId: string, type?: string, scope?: string) => {
+    const params = new URLSearchParams();
+    if (type) params.set("type", type);
+    if (scope) params.set("scope", scope);
+    const qs = params.toString();
+    return fetch(`/api/engagements/${engagementId}/source-items${qs ? `?${qs}` : ""}`)
+      .then(json<SourceItemRow[]>);
+  },
 
   migrate: (engagementId: string, input: MigrateInput) =>
     fetch(`/api/engagements/${engagementId}/migrate`, {
@@ -244,7 +249,7 @@ export interface MigrateConnection {
 }
 
 export interface MigrateInput extends MigrateConnection {
-  jobType: "text_secret" | "file_secret" | "account_unmanage_export" | "full";
+  jobType: "text_secret" | "file_secret" | "account_local" | "account_domain" | "full";
   dryRun: boolean;
   stagingFolderName?: string;
   selectedIds?: string[] | null;
