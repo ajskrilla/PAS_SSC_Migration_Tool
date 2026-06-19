@@ -93,7 +93,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             if (willDoFiles)
             {
                 var fileTpl = input.FileTemplateId ?? await ss.EnsureFileMigrationTemplateAsync(ct);
-                if (!await ss.TemplateHasFileFieldAsync(fileTpl, ct))
+                if (!await ss.TemplateHasFileFieldAsync(fileTpl, stagingId, ct))
                     throw new InvalidOperationException(
                         $"The selected file-secret template (id {fileTpl}) has no File-type field, " +
                         "so it cannot store attachments. Pick a template with a File field, or use " +

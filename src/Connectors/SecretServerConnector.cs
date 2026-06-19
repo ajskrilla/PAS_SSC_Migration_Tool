@@ -215,19 +215,22 @@ public sealed class SecretServerConnector
     /// Returns true if the template has at least one File-type field (so it can hold a file
     /// attachment). Used to bail before migrating files into a template that can't store them.
     /// </summary>
-    public async Task<bool> TemplateHasFileFieldAsync(long templateId, CancellationToken ct = default)
+    public async Task<bool> TemplateHasFileFieldAsync(long templateId, long folderId, CancellationToken ct = default)
     {
-        var req = SsRequest(HttpMethod.Get, $"/secret-templates/{templateId}/fields");
+        // Read the template's field shape via GET /secrets/stub - the SAME call CreateSecretAsync
+        // relies on, so it's proven to work on this tenant. The older GET /secret-templates/{id}/fields
+        // returns 405 here (that path only supports POST-to-add-a-field). The stub requires a
+        // folderId (else API_FolderIdRequired); the staging folder id is passed in.
+        var req = SsRequest(HttpMethod.Get,
+            $"/secrets/stub?filter.secrettemplateid={templateId}&filter.folderId={folderId}");
         using var resp = await _http.SendAsync(req, ct);
         if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return false;
-        var body = await EnsureOk(resp, "GET", $"/secret-templates/{templateId}/fields", ct);
+        var body = await EnsureOk(resp, "GET", "/secrets/stub", ct);
         using var doc = JsonDocument.Parse(body);
-        // The fields endpoint returns an array (or {records:[...]}). Handle both.
-        var arr = doc.RootElement.ValueKind == JsonValueKind.Array
-            ? doc.RootElement
-            : (doc.RootElement.TryGetProperty("records", out var r) ? r : default);
-        if (arr.ValueKind != JsonValueKind.Array) return false;
-        foreach (var f in arr.EnumerateArray())
+        // The stub carries an "items" array; each item describes one template field with isFile.
+        if (!doc.RootElement.TryGetProperty("items", out var items)
+            || items.ValueKind != JsonValueKind.Array) return false;
+        foreach (var f in items.EnumerateArray())
         {
             // A file field reports isFile=true, or type/fieldType "File".
             if (f.TryGetProperty("isFile", out var isf) && isf.ValueKind == JsonValueKind.True) return true;
