@@ -313,10 +313,9 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             return;
         }
 
-        // Resolve the account staging root "Migrated Accounts" (separate from the secret staging
-        // folder), then the scope subfolder. Reuse the same dedup cache for idempotent re-runs.
-        var accountsRoot = await ss.EnsureFolderAsync("Migrated Accounts", -1, ct);
-        var folderId = await EnsureFolderPath(ss, accountsRoot, relPath, folderCache, ct);
+        // Place everything under <staging>/Migrated Accounts/<scope path>, routed through the
+        // dedup cache so it nests under the staging folder and never creates duplicate folders.
+        var folderId = await EnsureFolderPath(ss, stagingId, $"Migrated Accounts/{relPath}", folderCache, ct);
 
         var template = await ss.FindTemplateAsync(templateName, ct)
             ?? await ss.FindTemplateAsync(fallbackName, ct);

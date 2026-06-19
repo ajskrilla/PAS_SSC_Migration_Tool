@@ -9,10 +9,14 @@ const outcomeTone = (o: string | null) => {
   return "";
 };
 
+const PAGE_SIZE = 50;
+
 export function Logs() {
   const [engagements, setEngagements] = useState<Engagement[]>([]);
   const [engagementId, setEngagementId] = useState("");
   const [rows, setRows] = useState<LogRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);   // zero-based
   const [auto, setAuto] = useState(false);
 
   useEffect(() => {
@@ -23,15 +27,28 @@ export function Logs() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const load = () => { if (engagementId) api.logs(engagementId, 300).then(setRows).catch(() => {}); };
-  useEffect(load, [engagementId]);
+  const load = (p = page) => {
+    if (!engagementId) return;
+    api.logs(engagementId, PAGE_SIZE, p * PAGE_SIZE)
+      .then((res) => { setRows(res.rows); setTotal(res.total); })
+      .catch(() => {});
+  };
+
+  // Reset to first page when the engagement changes.
+  useEffect(() => { setPage(0); load(0); /* eslint-disable-next-line */ }, [engagementId]);
+  // Reload when the page changes.
+  useEffect(() => { load(page); /* eslint-disable-next-line */ }, [page]);
 
   useEffect(() => {
     if (!auto) return;
-    const t = setInterval(load, 3000);
+    const t = setInterval(() => load(page), 3000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto, engagementId]);
+  }, [auto, engagementId, page]);
+
+  const lastPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
+  const from = total === 0 ? 0 : page * PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * PAGE_SIZE);
 
   return (
     <div>
@@ -42,7 +59,7 @@ export function Logs() {
             <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
             <span className="muted">Auto-refresh</span>
           </label>
-          <button className="btn ghost small" onClick={load}>Refresh</button>
+          <button className="btn ghost small" onClick={() => load(page)}>Refresh</button>
         </div>
       </header>
 
@@ -58,24 +75,39 @@ export function Logs() {
       {rows.length === 0 ? (
         <div className="panel"><p className="muted">No log entries yet for this engagement.</p></div>
       ) : (
-        <table className="data">
-          <thead>
-            <tr><th>Time</th><th>Type</th><th>Action</th><th>Outcome</th><th>Detail</th></tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i}>
-                <td className="muted" style={{ whiteSpace: "nowrap" }}>
-                  {new Date(r.occurred_at).toLocaleTimeString()}
-                </td>
-                <td><span className="tag">{r.event_type}</span></td>
-                <td>{r.action || "—"}</td>
-                <td><span className={`tag ${outcomeTone(r.outcome)}`}>{r.outcome || "—"}</span></td>
-                <td className="muted log-detail">{r.message || "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <>
+          <table className="data">
+            <thead>
+              <tr><th>Time</th><th>Type</th><th>Action</th><th>Outcome</th><th>Detail</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i}>
+                  <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                    {new Date(r.occurred_at).toLocaleTimeString()}
+                  </td>
+                  <td><span className="tag">{r.event_type}</span></td>
+                  <td>{r.action || "—"}</td>
+                  <td><span className={`tag ${outcomeTone(r.outcome)}`}>{r.outcome || "—"}</span></td>
+                  <td className="muted log-detail">{r.message || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="page-controls" style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12,
+          }}>
+            <span className="muted">{from}–{to} of {total}</span>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn ghost small" onClick={() => setPage(0)} disabled={page === 0}>« First</button>
+              <button className="btn ghost small" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={page === 0}>‹ Prev</button>
+              <span className="muted" style={{ alignSelf: "center" }}>Page {page + 1} of {lastPage + 1}</span>
+              <button className="btn ghost small" onClick={() => setPage((p) => Math.min(lastPage, p + 1))} disabled={page >= lastPage}>Next ›</button>
+              <button className="btn ghost small" onClick={() => setPage(lastPage)} disabled={page >= lastPage}>Last »</button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

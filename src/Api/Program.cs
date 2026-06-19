@@ -340,12 +340,19 @@ app.MapGet("/api/engagements/{id:guid}/source-items",
 // Migration delta/status: how many of each item type are migrated vs pending vs failed.
 // Compares the latest source inventory against migration_item progress.
 app.MapGet("/api/engagements/{id:guid}/logs",
-    async (Guid id, IDbConnection db, int? limit) =>
-        Results.Ok(await db.QueryAsync(
+    async (Guid id, IDbConnection db, int? limit, int? offset) =>
+    {
+        var lim = limit is > 0 and <= 200 ? limit!.Value : 50;
+        var off = offset is > 0 ? offset!.Value : 0;
+        var total = await db.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM event_log WHERE engagement_id=@id", new { id });
+        var rows = await db.QueryAsync(
             @"SELECT occurred_at, event_type, action, outcome, message, tenant_role
               FROM event_log WHERE engagement_id=@id
-              ORDER BY occurred_at DESC LIMIT @lim",
-            new { id, lim = limit is > 0 and <= 1000 ? limit : 200 })));
+              ORDER BY occurred_at DESC LIMIT @lim OFFSET @off",
+            new { id, lim, off });
+        return Results.Ok(new { total, limit = lim, offset = off, rows });
+    });
 
 // The currently-running job for an engagement (so the UI can offer an abort button
 // even though the migrate request is still in flight).

@@ -150,8 +150,9 @@ export const api = {
     fetch(`/api/engagements/${engagementId}/credentials/clear`, { method: "POST" })
       .then(json<{ cleared: boolean }>),
 
-  logs: (engagementId: string, limit = 200) =>
-    fetch(`/api/engagements/${engagementId}/logs?limit=${limit}`).then(json<LogRow[]>),
+  logs: (engagementId: string, limit = 50, offset = 0) =>
+    fetch(`/api/engagements/${engagementId}/logs?limit=${limit}&offset=${offset}`)
+      .then(json<LogPage>),
 
   runningJob: (engagementId: string) =>
     fetch(`/api/engagements/${engagementId}/running-job`)
@@ -227,6 +228,13 @@ export interface LogRow {
   outcome: string | null;
   message: string | null;
   tenant_role: string | null;
+}
+
+export interface LogPage {
+  total: number;
+  limit: number;
+  offset: number;
+  rows: LogRow[];
 }
 
 export interface SourceItemRow {
