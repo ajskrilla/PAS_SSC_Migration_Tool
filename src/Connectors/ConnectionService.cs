@@ -115,6 +115,32 @@ public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpF
         var templates = await ss.ListTemplatesAsync(ct);
         return templates.Select(t => new TemplateOption(t.Id, t.Name)).ToList();
     }
+
+    /// <summary>Create a file-capable template (Name/Description/File) on the target.</summary>
+    public async Task<TemplateOption> CreateFileTemplateAsync(
+        TestConnectionInput input, string name, CancellationToken ct)
+    {
+        var http = httpFactory.CreateClient("tenant");
+        using var creds = new TenantCredentials
+        {
+            ClientId = input.ClientId, ClientSecret = input.ClientSecret, Scope = input.Scope,
+        };
+        var ss = new SecretServerConnector(
+            http,
+            input.PlatformBaseUrl ?? input.BaseUrl!,
+            input.SecretServerBaseUrl ?? input.BaseUrl!,
+            input.AuthMode == "legacy_password"
+                ? SecretServerConnector.AuthMode.LegacyPassword
+                : SecretServerConnector.AuthMode.PlatformClientCredentials);
+        if (input.AuthMode == "legacy_password")
+            await ss.AuthenticateLegacyAsync(input.Username!, input.ClientSecret, ct);
+        else
+            await ss.AuthenticatePlatformAsync(creds, ct);
+
+        var tplName = string.IsNullOrWhiteSpace(name) ? "Migration File Template" : name;
+        var id = await ss.CreateFileTemplateAsync(tplName, ct);
+        return new TemplateOption(id, tplName);
+    }
 }
 
 public sealed record TemplateOption(long Id, string Name);

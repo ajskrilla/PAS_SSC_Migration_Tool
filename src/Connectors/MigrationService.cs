@@ -56,8 +56,11 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
                 await ss.AuthenticatePlatformAsync(screds, ct);
 
             // Ensure the staging root folder (idempotent).
+            // Default to a single fixed staging folder reused across runs (the folder-dedup
+            // preload makes re-runs accumulate into it rather than duplicating). Users can still
+            // override with an explicit name.
             var stagingName = string.IsNullOrWhiteSpace(input.StagingFolderName)
-                ? $"PAS_Migration_{DateTime.UtcNow:yyyyMMdd}"
+                ? "PAS_Migration"
                 : input.StagingFolderName!;
             long stagingId = 0;
             if (!input.DryRun)
@@ -80,6 +83,22 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             var folderCache = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             if (!input.DryRun && stagingId > 0)
                 await PreloadFolderCache(ss, stagingId, folderCache, ct);
+
+            // Guard: if this run will migrate file secrets, confirm the chosen template can
+            // actually hold a file. Bail the whole job early (clear message) rather than failing
+            // every file item or silently creating fileless secrets.
+            var willDoFiles = !input.DryRun &&
+                (input.JobType == "file_secret" || input.JobType == "full") &&
+                sourceItems.Any(s => s.ItemType == "file_secret");
+            if (willDoFiles)
+            {
+                var fileTpl = input.FileTemplateId ?? await ss.EnsureFileMigrationTemplateAsync(ct);
+                if (!await ss.TemplateHasFileFieldAsync(fileTpl, ct))
+                    throw new InvalidOperationException(
+                        $"The selected file-secret template (id {fileTpl}) has no File-type field, " +
+                        "so it cannot store attachments. Pick a template with a File field, or use " +
+                        "the 'Create file template' button to make one.");
+            }
 
             foreach (var si in sourceItems)
             {

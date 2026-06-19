@@ -64,6 +64,19 @@ export function Migration() {
     }
   };
 
+  const createFileTemplate = async () => {
+    setTplMsg("Creating file template…");
+    try {
+      const created = await api.createFileTemplate(
+        conn as unknown as Record<string, unknown>, "Migration File Template");
+      setTplMsg(`Created "${created.name}" (#${created.id}).`);
+      await loadTemplates();          // refresh the list
+      setFileTemplateId(created.id);  // and select the new one
+    } catch (e) {
+      setTplMsg(`Couldn't create template: ${String(e)}`);
+    }
+  };
+
   const loadStatus = (eng: string) => {
     if (!eng) { setStatus(null); return; }
     api.migrationStatus(eng).then(setStatus).catch(() => setStatus(null));
@@ -168,6 +181,63 @@ export function Migration() {
 
   const credsReady = conn.pasClientId && conn.pasClientSecret && conn.ssClientId && conn.ssClientSecret;
 
+  const exportReportCsv = () => {
+    if (!report) return;
+    const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const header = ["Type", "Name", "Folder", "Status", "Target ID", "Error"];
+    const lines = [header.map(esc).join(",")];
+    for (const it of report.items) {
+      lines.push([
+        it.item_type, it.source_name, it.source_folder_path || "",
+        it.status, it.target_native_id || "", it.last_error || "",
+      ].map((v) => esc(String(v))).join(","));
+    }
+    const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `migration-report-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const exportReportPdf = () => {
+    if (!report) return;
+    // Dependency-free PDF: open a print-friendly window and let the browser "Save as PDF".
+    const rows = report.items.map((it) => `
+      <tr>
+        <td>${escapeHtml(it.item_type)}</td><td>${escapeHtml(it.source_name)}</td>
+        <td>${escapeHtml(it.source_folder_path || "—")}</td>
+        <td>${escapeHtml(it.status)}</td><td>${escapeHtml(it.target_native_id || "—")}</td>
+        <td>${escapeHtml(it.last_error || "—")}</td>
+      </tr>`).join("");
+    const job = report.jobs[0];
+    const summary = job
+      ? `<p>Job ${escapeHtml(job.job_type)} · ${escapeHtml(job.mode)} · ${escapeHtml(job.status)} —
+         total ${job.total}, succeeded ${job.succeeded}, failed ${job.failed}, skipped ${job.skipped}</p>`
+      : "";
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(`<!doctype html><html><head><title>Migration Report</title>
+      <style>
+        body{font-family:system-ui,sans-serif;padding:24px;color:#111}
+        h1{font-size:18px} table{border-collapse:collapse;width:100%;font-size:12px;margin-top:12px}
+        th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}
+        th{background:#f3f3f3}
+      </style></head><body>
+      <h1>PAS &rarr; Secret Server Migration Report</h1>
+      <p>Generated ${new Date().toLocaleString()}</p>${summary}
+      <table><thead><tr><th>Type</th><th>Name</th><th>Folder</th><th>Status</th>
+      <th>Target ID</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table>
+      </body></html>`);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 300);
+  };
+
   return (
     <div>
       <header className="page-head"><h1>Migration</h1></header>
@@ -190,7 +260,7 @@ export function Migration() {
           </label>
           <label className="field">
             <span>Staging folder name</span>
-            <input value={staging} placeholder="PAS_Migration_<date>"
+            <input value={staging} placeholder="PAS_Migration"
               onChange={(e) => setStaging(e.target.value)} />
           </label>
         </div>
@@ -254,6 +324,11 @@ export function Migration() {
                   <option value="">{templates.length ? "— select —" : "Load templates first"}</option>
                   {templates.map((t) => <option key={t.id} value={t.id}>{t.name} (#{t.id})</option>)}
                 </select>
+                <button className="btn ghost small" style={{ marginTop: 6 }}
+                  onClick={createFileTemplate}
+                  disabled={!conn.ssClientId || !conn.ssClientSecret}>
+                  Create file template
+                </button>
               </label>
             )}
           </div>
@@ -375,7 +450,13 @@ export function Migration() {
       {/* Report */}
       {report && report.items.length > 0 && (
         <div className="panel">
-          <h2>Migration report</h2>
+          <header className="page-head">
+            <h2 style={{ margin: 0 }}>Migration report</h2>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn ghost small" onClick={exportReportCsv}>Export CSV</button>
+              <button className="btn ghost small" onClick={exportReportPdf}>Export PDF</button>
+            </div>
+          </header>
           <table className="data" style={{ marginTop: 10 }}>
             <thead>
               <tr><th>Type</th><th>Name</th><th>Folder</th><th>Status</th><th>Target ID</th><th>Error</th></tr>

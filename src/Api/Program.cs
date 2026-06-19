@@ -181,6 +181,13 @@ app.MapGet("/api/engagements/{id:guid}/reconciliation",
 // ---- Migration (write; dry-run aware) ----
 
 // Run a migration job (text_secret | file_secret | account_unmanage_export | full).
+app.MapPost("/api/templates/create-file",
+    async (CreateFileTemplateRequest req, ConnectionService svc, CancellationToken ct) =>
+    {
+        try { return Results.Ok(await svc.CreateFileTemplateAsync(req.Connection, req.Name, ct)); }
+        catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
+    });
+
 app.MapPost("/api/templates",
     async (TestConnectionInput input, ConnectionService svc, CancellationToken ct) =>
     {
@@ -291,3 +298,4 @@ app.Run();
 
 public record CreateEngagement(string Name, string CustomerName);
 public record RevertRequest(bool Confirm, MigrationRunInput Connection);
+public record CreateFileTemplateRequest(TestConnectionInput Connection, string Name);

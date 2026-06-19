@@ -171,6 +171,24 @@ export const api = {
         clientSecret: conn.ssClientSecret,
       }),
     }).then(json<TemplateOption[]>),
+
+  createFileTemplate: (conn: Record<string, unknown>, name: string) =>
+    fetch(`/api/templates/create-file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        connection: {
+          systemType: "secret_server",
+          authMode: "platform_client_credentials",
+          baseUrl: conn.ssBaseUrl,
+          platformBaseUrl: conn.ssPlatformBaseUrl,
+          secretServerBaseUrl: conn.ssSecretServerBaseUrl,
+          clientId: conn.ssClientId,
+          clientSecret: conn.ssClientSecret,
+        },
+        name,
+      }),
+    }).then(json<TemplateOption>),
 };
 
 export interface TemplateOption { id: number; name: string; }

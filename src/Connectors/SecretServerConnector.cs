@@ -211,6 +211,75 @@ public sealed class SecretServerConnector
         return all.OrderBy(t => t.Item2, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    /// <summary>
+    /// Returns true if the template has at least one File-type field (so it can hold a file
+    /// attachment). Used to bail before migrating files into a template that can't store them.
+    /// </summary>
+    public async Task<bool> TemplateHasFileFieldAsync(long templateId, CancellationToken ct = default)
+    {
+        var req = SsRequest(HttpMethod.Get, $"/secret-templates/{templateId}/fields");
+        using var resp = await _http.SendAsync(req, ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return false;
+        var body = await EnsureOk(resp, "GET", $"/secret-templates/{templateId}/fields", ct);
+        using var doc = JsonDocument.Parse(body);
+        // The fields endpoint returns an array (or {records:[...]}). Handle both.
+        var arr = doc.RootElement.ValueKind == JsonValueKind.Array
+            ? doc.RootElement
+            : (doc.RootElement.TryGetProperty("records", out var r) ? r : default);
+        if (arr.ValueKind != JsonValueKind.Array) return false;
+        foreach (var f in arr.EnumerateArray())
+        {
+            // A file field reports isFile=true, or type/fieldType "File".
+            if (f.TryGetProperty("isFile", out var isf) && isf.ValueKind == JsonValueKind.True) return true;
+            foreach (var typeProp in new[] { "type", "fieldType", "dataType" })
+                if (f.TryGetProperty(typeProp, out var t) && t.ValueKind == JsonValueKind.String
+                    && string.Equals(t.GetString(), "File", StringComparison.OrdinalIgnoreCase))
+                    return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Create a file-capable template (fields: Name[text], Description[text], File[file]) -
+    /// mirrors the working "Migration File Template" the user built by hand. Returns its id.
+    /// Field creation uses the per-field endpoint, which is more reliable than inlining fields
+    /// on the template-create body (that path fails with "Failed to set column ...").
+    /// </summary>
+    public async Task<long> CreateFileTemplateAsync(string name, CancellationToken ct = default)
+    {
+        // 1. Create the bare template.
+        var createReq = SsRequest(HttpMethod.Post, "/secret-templates");
+        createReq.Content = JsonBody(new { name });
+        using var createResp = await _http.SendAsync(createReq, ct);
+        var createdBody = await EnsureOk(createResp, "POST", "/secret-templates", ct);
+        using var createdDoc = JsonDocument.Parse(createdBody);
+        var templateId = createdDoc.RootElement.GetProperty("id").GetInt64();
+
+        // 2. Add fields one at a time: Name (text), Description (text), File (file).
+        async Task AddField(string fieldName, string slug, bool isFile)
+        {
+            var fReq = SsRequest(HttpMethod.Post, $"/secret-templates/{templateId}/fields");
+            fReq.Content = JsonBody(new
+            {
+                secretTemplateId = templateId,
+                displayName = fieldName,
+                fieldSlugName = slug,
+                isFile,
+                isPassword = false,
+                isNotes = false,
+                isRequired = isFile,           // require the file field
+                fieldDescription = fieldName,
+            });
+            using var fResp = await _http.SendAsync(fReq, ct);
+            await EnsureOk(fResp, "POST", $"/secret-templates/{templateId}/fields", ct);
+        }
+
+        await AddField("Name", "name", false);
+        await AddField("Description", "description", false);
+        await AddField("File", "file", true);
+        return templateId;
+    }
+
     /// <summary>Find a secret template id by name.</summary>
     public async Task<long?> FindTemplateAsync(string name, CancellationToken ct = default)
     {
@@ -266,6 +335,7 @@ public sealed class SecretServerConnector
 
         // Re-derive items from the raw stub JSON, preserving each item's full shape.
         var items = new List<Dictionary<string, object?>>();
+        string? fileSlug = null;  // set if the template has a file field we need to upload to
         if (stub.TryGetProperty("items", out var stubItems) && stubItems.ValueKind == JsonValueKind.Array)
         {
             foreach (var it in stubItems.EnumerateArray())
@@ -275,12 +345,14 @@ public sealed class SecretServerConnector
                            ?? new Dictionary<string, object?>();
                 var slug = it.TryGetProperty("slug", out var s) ? s.GetString() ?? "" : "";
                 var isFile = it.TryGetProperty("isFile", out var f) && f.ValueKind == JsonValueKind.True;
-                // For a file upload, fill the FIRST file-type item (matches the proven import
-                // script's `Where isFile` approach) rather than relying on a specific slug.
+                // For a file field, DON'T inline the base64 in the create body - Secret Server caps
+                // item value length (API_InvalidSecretItemValueLength) and large files blow past it.
+                // We create the secret with the file field empty, then upload via the dedicated
+                // file-upload endpoint below (no size cap).
                 if (isFile && fileField is { } ff)
                 {
-                    item["filename"] = ff.Filename;
-                    item["itemValue"] = ff.Base64;
+                    item["filename"] = ff.Filename;   // set the name; value uploaded separately
+                    fileSlug = string.IsNullOrEmpty(slug) ? "file" : slug;
                 }
                 else if (textValuesBySlug.TryGetValue(slug, out var val))
                 {
@@ -296,7 +368,35 @@ public sealed class SecretServerConnector
         using var resp = await _http.SendAsync(req, ct);
         var createdBody = await EnsureOk(resp, "POST", "/secrets", ct);
         using var doc = JsonDocument.Parse(createdBody);
-        return doc.RootElement.GetProperty("id").GetInt64();
+        var secretId = doc.RootElement.GetProperty("id").GetInt64();
+
+        // If this is a file secret, upload the bytes to the file field via the dedicated
+        // endpoint (multipart). This avoids the inline base64 length cap entirely.
+        if (fileSlug is not null && fileField is { } ff2)
+            await UploadSecretFileAsync(secretId, fileSlug, ff2.Filename, ff2.Base64, ct);
+
+        return secretId;
+    }
+
+    /// <summary>
+    /// Upload a file to a secret's file field via POST /secrets/{id}/fields/{slug} (multipart).
+    /// Used instead of inlining base64 on create, which Secret Server caps in length.
+    /// </summary>
+    private async Task UploadSecretFileAsync(
+        long secretId, string slug, string filename, string base64, CancellationToken ct)
+    {
+        var bytes = Convert.FromBase64String(base64);
+        using var content = new MultipartFormDataContent();
+        var fileContent = new ByteArrayContent(bytes);
+        fileContent.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        // Secret Server expects the file part named "file" with the filename.
+        content.Add(fileContent, "file", filename);
+
+        var req = SsRequest(HttpMethod.Post, $"/secrets/{secretId}/fields/{slug}");
+        req.Content = content;  // multipart, not JSON
+        using var resp = await _http.SendAsync(req, ct);
+        await EnsureOk(resp, "POST", $"/secrets/{secretId}/fields/{slug}", ct);
     }
 
     /// <summary>
