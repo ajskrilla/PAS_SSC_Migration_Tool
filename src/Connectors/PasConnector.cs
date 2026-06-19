@@ -280,15 +280,36 @@ public sealed class PasConnector
     /// The Host->Server.ID join column can vary by tenant; if this returns no Server fields,
     /// fall back to InventoryLocalAccountsNoJoinAsync.
     /// </summary>
+    /// <summary>
+    /// All LOCAL accounts (Host set, DomainID null) joined to their Server for FQDN/ComputerClass.
+    /// </summary>
     public Task<List<Dictionary<string, object?>>> InventoryLocalAccountsAsync(CancellationToken ct = default) =>
         QueryAsync(
             @"SELECT VaultAccount.ID, VaultAccount.User, VaultAccount.IsManaged,
-                     VaultAccount.Description, VaultAccount.Status,
+                     VaultAccount.Description, VaultAccount.Status, VaultAccount.MPParent,
                      Server.Name AS ServerName, Server.FQDN AS ServerFQDN,
                      Server.ComputerClass AS ComputerClass
               FROM VaultAccount
               LEFT JOIN Server ON VaultAccount.Host = Server.ID
-              WHERE VaultAccount.DomainID IS NULL", ct);
+              WHERE VaultAccount.DomainID IS NULL AND VaultAccount.Host IS NOT NULL", ct);
+
+    /// <summary>
+    /// All DOMAIN accounts (DomainID set) joined to VaultDomain for the domain name.
+    /// </summary>
+    public Task<List<Dictionary<string, object?>>> InventoryDomainAccountsAsync(CancellationToken ct = default) =>
+        QueryAsync(
+            @"SELECT VaultAccount.ID, VaultAccount.User, VaultAccount.IsManaged,
+                     VaultAccount.Description, VaultAccount.Status, VaultAccount.MPParent,
+                     VaultDomain.Name AS DomainName
+              FROM VaultAccount
+              JOIN VaultDomain ON VaultAccount.DomainID = VaultDomain.ID", ct);
+
+    /// <summary>
+    /// Multiplexed accounts - these have NO migration path and must be flagged in inventory.
+    /// Returns empty if the tenant has none.
+    /// </summary>
+    public Task<List<Dictionary<string, object?>>> InventoryMultiplexedAccountsAsync(CancellationToken ct = default) =>
+        QueryAsync(@"SELECT ID, Name, Description FROM MultiplexedAccount", ct);
 
     /// <summary>Fallback: local accounts without the Server join (when the join column differs).</summary>
     public Task<List<Dictionary<string, object?>>> InventoryLocalAccountsNoJoinAsync(CancellationToken ct = default) =>

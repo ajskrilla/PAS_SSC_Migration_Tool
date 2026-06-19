@@ -114,6 +114,19 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
                         await MigrateFileSecret(pas, ss, si, stagingId, folderCache, input, jobId, engagementId, ct);
                     else if (si.ItemType == "account")
                         await MigrateAccount(pas, ss, si, stagingId, folderCache, input, jobId, engagementId, result, ct);
+                    else if (si.ItemType == "multiplexed_account")
+                    {
+                        // No migration path. Record as skipped+excluded so the report is explicit.
+                        result.Skipped++;
+                        result.Excluded.Add(new ExcludedItem(
+                            si.SourceNativeId, si.Name, "no_migration_path",
+                            "Multiplexed accounts have no Secret Server migration path."));
+                        await SetItemStatus(engagementId, si, "skipped", "Multiplexed account: no migration path.");
+                        await Log(engagementId, jobId, "api_call", si.SourceNativeId,
+                            $"multiplexed account '{si.Name}'", "skipped", "No migration path.");
+                        result.Total++;
+                        continue;
+                    }
                     else
                         continue; // folders are created on demand
 
@@ -254,42 +267,80 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             }
         }
 
-        // Pick Windows vs UNIX template from ComputerClass captured in inventory attributes.
+        // Classify: local (Host) vs domain (DomainID); Windows vs Unix by ComputerClass.
+        var scope = (si.Attributes.TryGetValue("AccountScope", out var sc) ? sc?.ToString() : null) ?? "local";
+        var isDomain = string.Equals(scope, "domain", StringComparison.OrdinalIgnoreCase);
         var computerClass = (si.Attributes.TryGetValue("ComputerClass", out var cc) ? cc?.ToString() : null) ?? "";
-        var isUnix = computerClass.Contains("Unix", StringComparison.OrdinalIgnoreCase)
-                  || computerClass.Contains("Linux", StringComparison.OrdinalIgnoreCase);
-        var templateName = isUnix ? "Unix Account (SSH)" : "Windows Account";
+        // Unix signals seen in this tenant: "CustomSsh"; also accept Unix/Linux/SSH generally.
+        var isUnix = !isDomain && (
+            computerClass.Contains("Ssh", StringComparison.OrdinalIgnoreCase)
+            || computerClass.Contains("Unix", StringComparison.OrdinalIgnoreCase)
+            || computerClass.Contains("Linux", StringComparison.OrdinalIgnoreCase));
+
+        // Template per spec: Domain -> Active Directory; Local Windows -> Windows Account;
+        // Local Unix -> Unix Account (SSH). Allow UI override via input templates if provided.
+        var (templateName, fallbackName) = isDomain
+            ? ("Active Directory Account", "Active Directory")
+            : isUnix
+                ? ("Unix Account (SSH)", "Unix Account")
+                : ("Windows Account", "Windows Account");
+
+        // Build the secret name: Domain\User or FQDN\User (FQDN captured as FolderPath here).
+        var user = si.Name ?? "";
+        var hostOrDomain = si.FolderPath ?? "";  // local: ServerFQDN; domain: DomainName
+        var secretName = string.IsNullOrEmpty(hostOrDomain) ? user : $"{hostOrDomain}\\{user}";
+
+        // Target folder tree under "Migrated Accounts":
+        //   Domain        -> Migrated Accounts/Domain
+        //   Local Windows -> Migrated Accounts/Local/Windows
+        //   Local Unix    -> Migrated Accounts/Local/NIX
+        var relPath = isDomain ? "Domain"
+                    : isUnix ? "Local/NIX"
+                    : "Local/Windows";
 
         if (input.DryRun)
         {
             await Log(eng, jobId, "api_call", si.SourceNativeId,
-                $"account '{si.Name}' -> {templateName}", "planned");
+                $"account '{secretName}' -> {templateName} @ Migrated Accounts/{relPath}", "planned");
             return;
         }
 
-        var folderId = await EnsureFolderPath(ss, stagingId, si.FolderPath, folderCache, ct);
-        var template = await ss.FindTemplateAsync(templateName, ct)
-            ?? await ss.FindTemplateAsync(isUnix ? "Unix Account" : "Windows Account", ct)
-            ?? throw new InvalidOperationException($"Account template '{templateName}' not found on target.");
+        // Resolve the account staging root "Migrated Accounts" (separate from the secret staging
+        // folder), then the scope subfolder. Reuse the same dedup cache for idempotent re-runs.
+        var accountsRoot = await ss.EnsureFolderAsync("Migrated Accounts", -1, ct);
+        var folderId = await EnsureFolderPath(ss, accountsRoot, relPath, folderCache, ct);
 
+        var template = await ss.FindTemplateAsync(templateName, ct)
+            ?? await ss.FindTemplateAsync(fallbackName, ct);
+        if (template is not { } templateId)
+            throw new InvalidOperationException(
+                $"Account template '{templateName}' not found on target. Create it or adjust the name.");
+
+        // Unmanage already happened above; checkout the now-static password (in memory only).
         var (password, coid) = await pas.CheckoutPasswordAsync(si.SourceNativeId, ct);
         try
         {
-            var targetId = await ss.CreateSecretAsync(
-                si.Name ?? "(unnamed)", template, folderId,
-                new Dictionary<string, string>
-                {
-                    ["username"] = si.Name ?? "",
-                    ["password"] = password,
-                    ["machine"] = si.FolderPath ?? "",
-                    ["notes"] = si.Description ?? "",
-                }, null, ct);
+            // Field slugs differ slightly by template; CreateSecretAsync fills by slug and ignores
+            // unknown slugs, so we pass the common set (domain/host/username/password/notes).
+            var fields = new Dictionary<string, string>
+            {
+                ["username"] = user,
+                ["password"] = password,
+                ["notes"] = si.Description ?? "",
+            };
+            if (isDomain) fields["domain"] = hostOrDomain;
+            else fields["machine"] = hostOrDomain;
+
+            var targetId = await ss.CreateSecretAsync(secretName, templateId, folderId, fields, null, ct);
             await SetTargetId(eng, si, targetId.ToString());
             await Log(eng, jobId, "api_call", si.SourceNativeId,
-                $"account '{si.Name}' ({templateName})", "created");
+                $"account '{secretName}' ({templateName})", "created");
         }
         finally
         {
+            // Scrub the password reference; .NET strings are immutable but we drop the reference
+            // promptly and never log or persist it (per the §4 security model).
+            password = string.Empty;
             if (!string.IsNullOrEmpty(coid))
                 try { await pas.CheckinPasswordAsync(coid, ct); } catch { /* best effort */ }
         }

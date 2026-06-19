@@ -49,11 +49,17 @@ public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFa
         var summary = new
         {
             accounts = items.Count(i => i.ItemType == "account"),
+            local_accounts = items.Count(i => i.ItemType == "account"
+                && (i.Attributes.TryGetValue("AccountScope", out var s) ? s?.ToString() : null) == "local"),
+            domain_accounts = items.Count(i => i.ItemType == "account"
+                && (i.Attributes.TryGetValue("AccountScope", out var s) ? s?.ToString() : null) == "domain"),
             text_secrets = items.Count(i => i.ItemType == "text_secret"),
             file_secrets = items.Count(i => i.ItemType == "file_secret"),
             folders = items.Count(i => i.ItemType == "folder"),
             managed = items.Count(i => i is { ItemType: "account", IsManaged: true }),
             unmanaged = items.Count(i => i is { ItemType: "account", IsManaged: false }),
+            // Multiplexed accounts have NO migration path - surfaced so they're visible pre-migration.
+            multiplexed_accounts_no_migration_path = items.Count(i => i.ItemType == "multiplexed_account"),
             total = items.Count,
         };
 
@@ -124,22 +130,55 @@ public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFa
 
         var items = new List<InvItem>();
 
-        // Accounts: try the Server join; if it yields nothing, fall back to no-join.
-        var accounts = await pas.InventoryLocalAccountsAsync(ct);
-        if (accounts.Count == 0)
-            accounts = await pas.InventoryLocalAccountsNoJoinAsync(ct);
-        foreach (var r in accounts)
+        // LOCAL accounts (Host set): classify Windows vs Unix by ComputerClass downstream.
+        var localAccounts = await pas.InventoryLocalAccountsAsync(ct);
+        if (localAccounts.Count == 0)
+            localAccounts = await pas.InventoryLocalAccountsNoJoinAsync(ct);
+        foreach (var r in localAccounts)
         {
+            r["AccountScope"] = "local";
             items.Add(new InvItem
             {
                 ItemType = "account",
                 NativeId = Str(r, "ID"),
                 Name = Str(r, "User"),
-                FolderPath = Str(r, "ServerName") ?? Str(r, "ServerFQDN"),
+                FolderPath = Str(r, "ServerFQDN") ?? Str(r, "ServerName"),
                 IsManaged = Bool(r, "IsManaged"),
                 Attributes = r,
             });
         }
+
+        // DOMAIN accounts (DomainID set): always Active Directory template.
+        var domainAccounts = await pas.InventoryDomainAccountsAsync(ct);
+        foreach (var r in domainAccounts)
+        {
+            r["AccountScope"] = "domain";
+            items.Add(new InvItem
+            {
+                ItemType = "account",
+                NativeId = Str(r, "ID"),
+                Name = Str(r, "User"),
+                FolderPath = Str(r, "DomainName"),
+                IsManaged = Bool(r, "IsManaged"),
+                Attributes = r,
+            });
+        }
+
+        // MULTIPLEXED accounts: NO migration path - capture and flag for the pre-migration report.
+        try
+        {
+            var muxed = await pas.InventoryMultiplexedAccountsAsync(ct);
+            foreach (var r in muxed)
+                items.Add(new InvItem
+                {
+                    ItemType = "multiplexed_account",
+                    NativeId = Str(r, "ID"),
+                    Name = Str(r, "Name"),
+                    FolderPath = null,
+                    Attributes = r,
+                });
+        }
+        catch { /* table may be absent on some tenants */ }
 
         // Secrets: Type is Text or File.
         var secrets = await pas.InventorySecretsAsync(ct);
