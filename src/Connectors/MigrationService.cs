@@ -169,8 +169,10 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             return;
         }
         var folderId = await EnsureFolderPath(ss, stagingId, si.FolderPath, folderCache, ct);
-        var template = await ss.FindTemplateAsync("Password", ct)
-            ?? throw new InvalidOperationException("Password template not found on target.");
+        var template = input.TextTemplateId
+            ?? await ss.FindTemplateAsync("Password", ct)
+            ?? throw new InvalidOperationException(
+                "No text-secret template selected and 'Password' template not found on target.");
         var content = await pas.RetrieveTextSecretAsync(si.SourceNativeId, ct); // in memory only
         var targetId = await ss.CreateSecretAsync(
             si.Name ?? "(unnamed)", template, folderId,
@@ -190,7 +192,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
             return;
         }
         var folderId = await EnsureFolderPath(ss, stagingId, si.FolderPath, folderCache, ct);
-        var template = await ss.EnsureFileMigrationTemplateAsync(ct);
+        var template = input.FileTemplateId ?? await ss.EnsureFileMigrationTemplateAsync(ct);
         var bytes = await pas.DownloadFileSecretAsync(si.SourceNativeId, ct); // in memory only
         var b64 = Convert.ToBase64String(bytes);
         // Use the ORIGINAL stored filename (with extension) from inventory, not the secret name.
@@ -493,7 +495,9 @@ public sealed record MigrationRunInput(
     string? PasBaseUrl, string? PasAppId, string PasClientId, string PasClientSecret, string? PasScope,
     // SS connection
     string? SsBaseUrl, string? SsPlatformBaseUrl, string? SsSecretServerBaseUrl,
-    string SsClientId, string SsClientSecret);
+    string SsClientId, string SsClientSecret,
+    // Optional template overrides chosen in the UI (null = auto-detect by name).
+    long? TextTemplateId = null, long? FileTemplateId = null);
 
 public sealed class MigrationJobResult
 {

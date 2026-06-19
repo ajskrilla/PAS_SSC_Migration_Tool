@@ -179,6 +179,38 @@ public sealed class SecretServerConnector
         => await FindFolderAsync(name, parentFolderId, ct)
            ?? await CreateFolderAsync(name, parentFolderId, ct);
 
+    /// <summary>
+    /// List all secret templates (id, name, hasFileField). Used to populate the UI template
+    /// picker. hasFileField is determined by fetching each template's fields - to keep it cheap
+    /// we only flag by name heuristic here; callers needing certainty can fetch the stub.
+    /// </summary>
+    public async Task<List<(long Id, string Name)>> ListTemplatesAsync(CancellationToken ct = default)
+    {
+        var all = new List<(long, string)>();
+        var skip = 0;
+        while (true)
+        {
+            var req = SsRequest(HttpMethod.Get, $"/secret-templates?take=1000&skip={skip}");
+            using var resp = await _http.SendAsync(req, ct);
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) break;
+            var body = await EnsureOk(resp, "GET", "/secret-templates", ct);
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("records", out var records)) break;
+            var count = 0;
+            foreach (var rec in records.EnumerateArray())
+            {
+                count++;
+                if (!rec.TryGetProperty("id", out var idEl) || !idEl.TryGetInt64(out var id)) continue;
+                var name = rec.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                all.Add((id, name));
+            }
+            var hasNext = doc.RootElement.TryGetProperty("hasNext", out var hn) && hn.ValueKind == JsonValueKind.True;
+            if (!hasNext || count == 0) break;
+            skip += count;
+        }
+        return all.OrderBy(t => t.Item2, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     /// <summary>Find a secret template id by name.</summary>
     public async Task<long?> FindTemplateAsync(string name, CancellationToken ct = default)
     {
@@ -269,33 +301,24 @@ public sealed class SecretServerConnector
 
     /// <summary>
     /// Ensure the "File Migration Template" exists (fields: Name, File, Description).
-    /// Returns its template id. Created once, reused thereafter.
+    /// <summary>
+    /// Resolve the template to use for migrated file secrets. Secret Server ships a built-in
+    /// "File" template, so we find and reuse it (like the reference import script) rather than
+    /// creating a custom template - template creation is often restricted and the create body
+    /// shape is finicky ("Failed to set column SecretFieldDescription").
     /// </summary>
     public async Task<long> EnsureFileMigrationTemplateAsync(CancellationToken ct = default)
     {
-        const string name = "File Migration Template";
-        var existing = await FindTemplateAsync(name, ct);
-        if (existing is { } id) return id;
-
-        // Create the template with a file field + description. Name is the secret name itself.
-        var body = new
+        // Try the common built-in file-template names, in order of preference.
+        foreach (var candidate in new[] { "File", "File Migration Template", "File Attachment", "Secret File" })
         {
-            name,
-            fields = new object[]
-            {
-                new { name = "File", isFile = true, fieldSlug = "file" },
-                new { name = "Description", isFile = false, fieldSlug = "description" },
-            },
-        };
-        var req = SsRequest(HttpMethod.Post, "/secret-templates");
-        req.Content = JsonBody(body);
-        using var resp = await _http.SendAsync(req, ct);
-        if (!resp.IsSuccessStatusCode)
-            throw new InvalidOperationException(
-                $"Create File Migration Template failed ({(int)resp.StatusCode}): {Trunc(await resp.Content.ReadAsStringAsync(ct))}. " +
-                "If template creation is restricted on this tenant, create it manually with fields Name/File/Description.");
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        return doc.RootElement.GetProperty("id").GetInt64();
+            var found = await FindTemplateAsync(candidate, ct);
+            if (found is { } id) return id;
+        }
+        throw new InvalidOperationException(
+            "No file-capable secret template found on the target (looked for 'File', " +
+            "'File Migration Template', 'File Attachment', 'Secret File'). Create a template " +
+            "with a file field in Secret Server, or tell me its exact name and I'll target it.");
     }
 
     /// <summary>Verify a secret's file item has an attachment id (byte-fidelity check helper).</summary>

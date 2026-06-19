@@ -156,7 +156,24 @@ export const api = {
   migrationStatus: (engagementId: string) =>
     fetch(`/api/engagements/${engagementId}/migration-status`)
       .then(json<MigrationStatus>),
+
+  listTemplates: (conn: Record<string, unknown>) =>
+    fetch(`/api/templates`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemType: "secret_server",
+        authMode: "platform_client_credentials",
+        baseUrl: conn.ssBaseUrl,
+        platformBaseUrl: conn.ssPlatformBaseUrl,
+        secretServerBaseUrl: conn.ssSecretServerBaseUrl,
+        clientId: conn.ssClientId,
+        clientSecret: conn.ssClientSecret,
+      }),
+    }).then(json<TemplateOption[]>),
 };
+
+export interface TemplateOption { id: number; name: string; }
 
 export interface MigrationStatusRow {
   item_type: string;
@@ -213,6 +230,8 @@ export interface MigrateInput extends MigrateConnection {
   dryRun: boolean;
   stagingFolderName?: string;
   selectedIds?: string[] | null;
+  textTemplateId?: number;
+  fileTemplateId?: number;
 }
 
 export interface MigrationJobResult {

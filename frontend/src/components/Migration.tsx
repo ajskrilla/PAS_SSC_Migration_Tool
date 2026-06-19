@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   api, type Engagement, type SourceItemRow, type MigrateConnection,
-  type MigrationJobResult, type MigrationReport, type MigrationStatus,
+  type MigrationJobResult, type MigrationReport, type MigrationStatus, type TemplateOption,
 } from "../lib/api";
 
 type JobType = "text_secret" | "file_secret" | "account_unmanage_export" | "full";
@@ -39,6 +39,30 @@ export function Migration() {
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<MigrationStatus | null>(null);
+  const [templates, setTemplates] = useState<TemplateOption[]>([]);
+  const [textTemplateId, setTextTemplateId] = useState<number | "">("");
+  const [fileTemplateId, setFileTemplateId] = useState<number | "">("");
+  const [tplMsg, setTplMsg] = useState<string | null>(null);
+
+  // Pick a sensible default template by name (user can override).
+  const pickDefault = (opts: TemplateOption[], wanted: RegExp, exclude?: RegExp) => {
+    const m = opts.find((o) => wanted.test(o.name) && (!exclude || !exclude.test(o.name)));
+    return m ? m.id : "";
+  };
+
+  const loadTemplates = async () => {
+    setTplMsg("Loading templates…");
+    try {
+      const opts = await api.listTemplates(conn as unknown as Record<string, unknown>);
+      setTemplates(opts);
+      // Defaults: exact "Password" for text; a file-ish template for files.
+      setTextTemplateId((cur) => cur || pickDefault(opts, /^password$/i) || pickDefault(opts, /password/i));
+      setFileTemplateId((cur) => cur || pickDefault(opts, /^file$/i) || pickDefault(opts, /file/i));
+      setTplMsg(`Loaded ${opts.length} templates.`);
+    } catch (e) {
+      setTplMsg(`Couldn't load templates: ${String(e)}. Enter SS credentials and try again.`);
+    }
+  };
 
   const loadStatus = (eng: string) => {
     if (!eng) { setStatus(null); return; }
@@ -116,6 +140,8 @@ export function Migration() {
         dryRun,
         stagingFolderName: staging || undefined,
         selectedIds: jobType === "full" ? null : Array.from(selected),
+        textTemplateId: textTemplateId === "" ? undefined : textTemplateId,
+        fileTemplateId: fileTemplateId === "" ? undefined : fileTemplateId,
       });
       setResult(r);
       loadReport();
@@ -195,6 +221,48 @@ export function Migration() {
           </div>
         </div>
       </div>
+
+      {/* Template picker (text + file secrets) */}
+      {(jobType === "text_secret" || jobType === "file_secret" || jobType === "full") && (
+        <div className="panel" style={{ marginBottom: 16 }}>
+          <header className="page-head" style={{ marginBottom: 10 }}>
+            <h2 style={{ margin: 0 }}>Target templates</h2>
+            <button className="btn ghost small" onClick={loadTemplates}
+              disabled={!conn.ssClientId || !conn.ssClientSecret}>
+              Load templates
+            </button>
+          </header>
+          {tplMsg && <p className="muted" style={{ marginTop: 0 }}>{tplMsg}</p>}
+          <div className="grid-2">
+            {(jobType === "text_secret" || jobType === "full") && (
+              <label className="field">
+                <span>Text-secret template</span>
+                <select value={textTemplateId}
+                  onChange={(e) => setTextTemplateId(e.target.value === "" ? "" : Number(e.target.value))}
+                  disabled={templates.length === 0}>
+                  <option value="">{templates.length ? "— select —" : "Load templates first"}</option>
+                  {templates.map((t) => <option key={t.id} value={t.id}>{t.name} (#{t.id})</option>)}
+                </select>
+              </label>
+            )}
+            {(jobType === "file_secret" || jobType === "full") && (
+              <label className="field">
+                <span>File-secret template</span>
+                <select value={fileTemplateId}
+                  onChange={(e) => setFileTemplateId(e.target.value === "" ? "" : Number(e.target.value))}
+                  disabled={templates.length === 0}>
+                  <option value="">{templates.length ? "— select —" : "Load templates first"}</option>
+                  {templates.map((t) => <option key={t.id} value={t.id}>{t.name} (#{t.id})</option>)}
+                </select>
+              </label>
+            )}
+          </div>
+          <p className="muted" style={{ marginBottom: 0, fontSize: 12 }}>
+            Defaults are auto-selected by name; override if your tenant uses different templates.
+            The file field is auto-detected from the chosen template.
+          </p>
+        </div>
+      )}
 
       {/* Checklist */}
       {jobType !== "full" && (

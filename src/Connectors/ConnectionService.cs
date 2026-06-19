@@ -91,7 +91,33 @@ public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpF
             return TestConnectionResult.Fail(ex.Message);
         }
     }
+
+    /// <summary>Authenticate to Secret Server and return its templates for the UI picker.</summary>
+    public async Task<List<TemplateOption>> ListTemplatesAsync(TestConnectionInput input, CancellationToken ct)
+    {
+        var http = httpFactory.CreateClient("tenant");
+        using var creds = new TenantCredentials
+        {
+            ClientId = input.ClientId, ClientSecret = input.ClientSecret, Scope = input.Scope,
+        };
+        var ss = new SecretServerConnector(
+            http,
+            input.PlatformBaseUrl ?? input.BaseUrl!,
+            input.SecretServerBaseUrl ?? input.BaseUrl!,
+            input.AuthMode == "legacy_password"
+                ? SecretServerConnector.AuthMode.LegacyPassword
+                : SecretServerConnector.AuthMode.PlatformClientCredentials);
+        if (input.AuthMode == "legacy_password")
+            await ss.AuthenticateLegacyAsync(input.Username!, input.ClientSecret, ct);
+        else
+            await ss.AuthenticatePlatformAsync(creds, ct);
+
+        var templates = await ss.ListTemplatesAsync(ct);
+        return templates.Select(t => new TemplateOption(t.Id, t.Name)).ToList();
+    }
 }
+
+public sealed record TemplateOption(long Id, string Name);
 
 /// <summary>Connection metadata to persist (no credentials).</summary>
 public sealed record ConnectionInput(

@@ -181,6 +181,13 @@ app.MapGet("/api/engagements/{id:guid}/reconciliation",
 // ---- Migration (write; dry-run aware) ----
 
 // Run a migration job (text_secret | file_secret | account_unmanage_export | full).
+app.MapPost("/api/templates",
+    async (TestConnectionInput input, ConnectionService svc, CancellationToken ct) =>
+    {
+        try { return Results.Ok(await svc.ListTemplatesAsync(input, ct)); }
+        catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
+    });
+
 app.MapPost("/api/engagements/{id:guid}/migrate",
     async (Guid id, MigrationRunInput input, MigrationService svc, CancellationToken ct) =>
     {
