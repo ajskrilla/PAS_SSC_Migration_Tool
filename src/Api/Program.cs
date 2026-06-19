@@ -57,7 +57,12 @@ try
     await fixupConn.ExecuteAsync(@"
         ALTER TABLE inventory_item DROP CONSTRAINT IF EXISTS inventory_item_item_type_check;
         ALTER TABLE inventory_item ADD CONSTRAINT inventory_item_item_type_check
-            CHECK (item_type IN ('account','text_secret','file_secret','folder','multiplexed_account'));");
+            CHECK (item_type IN ('account','text_secret','file_secret','folder','multiplexed_account'));
+
+        ALTER TABLE migration_job DROP CONSTRAINT IF EXISTS migration_job_job_type_check;
+        ALTER TABLE migration_job ADD CONSTRAINT migration_job_job_type_check
+            CHECK (job_type IN ('account_local','account_domain','account_unmanage_export',
+                                'text_secret','file_secret','folder_structure','full'));");
 }
 catch (Exception ex)
 {
@@ -242,6 +247,76 @@ app.MapGet("/api/engagements/{id:guid}/migration/report",
     });
 
 // Source items for the migration checklist (from latest source snapshot).
+// Overview metrics: account breakdown (win/unix/domain/multiplexed), managed split,
+// source-vs-target counts, and migration progress per type. Drives the Overview charts.
+app.MapGet("/api/engagements/{id:guid}/metrics",
+    async (Guid id, IDbConnection db) =>
+    {
+        const string latestSource = @"
+            SELECT ii.* FROM inventory_item ii
+            JOIN inventory_snapshot s ON s.id=ii.snapshot_id
+            JOIN tenant_connection tc ON tc.id=s.tenant_connection_id
+            WHERE s.engagement_id=@id AND tc.role='source'
+              AND s.captured_at=(SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+                WHERE s2.engagement_id=@id AND tc2.role='source')";
+
+        var accounts = (await db.QueryAsync(
+            $@"SELECT
+                 CASE
+                   WHEN item_type='multiplexed_account' THEN 'multiplexed'
+                   WHEN attributes->>'AccountScope'='domain' THEN 'domain'
+                   WHEN attributes->>'ComputerClass' ILIKE '%ssh%'
+                     OR attributes->>'ComputerClass' ILIKE '%unix%'
+                     OR attributes->>'ComputerClass' ILIKE '%linux%' THEN 'local_unix'
+                   ELSE 'local_windows'
+                 END AS bucket,
+                 COUNT(*) AS n
+               FROM ({latestSource}) q
+               WHERE item_type IN ('account','multiplexed_account')
+               GROUP BY bucket", new { id })).ToList();
+
+        var managed = (await db.QueryAsync(
+            $@"SELECT COALESCE(is_managed,false) AS is_managed, COUNT(*) AS n
+               FROM ({latestSource}) q WHERE item_type='account'
+               GROUP BY COALESCE(is_managed,false)", new { id })).ToList();
+
+        var progress = (await db.QueryAsync(
+            $@"SELECT q.item_type AS type, COUNT(*) AS total,
+                      COUNT(mi.target_native_id) AS migrated
+               FROM ({latestSource}) q
+               LEFT JOIN migration_item mi
+                 ON mi.engagement_id=@id AND mi.item_type=q.item_type
+                AND mi.source_native_id=q.source_native_id
+               GROUP BY q.item_type ORDER BY q.item_type", new { id })).ToList();
+
+        var sourceVsTarget = (await db.QueryAsync(
+            @"WITH latest_src AS (
+                SELECT ii.item_type, COUNT(*) n FROM inventory_item ii
+                JOIN inventory_snapshot s ON s.id=ii.snapshot_id
+                JOIN tenant_connection tc ON tc.id=s.tenant_connection_id
+                WHERE s.engagement_id=@id AND tc.role='source'
+                  AND s.captured_at=(SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                    JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+                    WHERE s2.engagement_id=@id AND tc2.role='source')
+                GROUP BY ii.item_type),
+              latest_tgt AS (
+                SELECT ii.item_type, COUNT(*) n FROM inventory_item ii
+                JOIN inventory_snapshot s ON s.id=ii.snapshot_id
+                JOIN tenant_connection tc ON tc.id=s.tenant_connection_id
+                WHERE s.engagement_id=@id AND tc.role='target'
+                  AND s.captured_at=(SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                    JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+                    WHERE s2.engagement_id=@id AND tc2.role='target')
+                GROUP BY ii.item_type)
+              SELECT COALESCE(s.item_type,t.item_type) AS type,
+                     COALESCE(s.n,0) AS source, COALESCE(t.n,0) AS target
+              FROM latest_src s FULL OUTER JOIN latest_tgt t ON s.item_type=t.item_type
+              ORDER BY type", new { id })).ToList();
+
+        return Results.Ok(new { accounts, managed, progress, sourceVsTarget });
+    });
+
 app.MapGet("/api/engagements/{id:guid}/source-items",
     async (Guid id, IDbConnection db, string? type, string? scope) =>
     {

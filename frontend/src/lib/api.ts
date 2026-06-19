@@ -113,6 +113,9 @@ export const api = {
   reconciliation: (engagementId: string) =>
     fetch(`/api/engagements/${engagementId}/reconciliation`).then(json<ReconRow[]>),
 
+  metrics: (engagementId: string) =>
+    fetch(`/api/engagements/${engagementId}/metrics`).then(json<Metrics>),
+
   sourceItems: (engagementId: string, type?: string, scope?: string) => {
     const params = new URLSearchParams();
     if (type) params.set("type", type);
@@ -316,4 +319,11 @@ export interface ReconRow {
   item_type: string;
   match_key: string;
   match_status: "source_only" | "target_only" | "matched" | "conflict";
+}
+
+export interface Metrics {
+  accounts: { bucket: string; n: number }[];
+  managed: { is_managed: boolean; n: number }[];
+  progress: { type: string; total: number; migrated: number }[];
+  sourceVsTarget: { type: string; source: number; target: number }[];
 }

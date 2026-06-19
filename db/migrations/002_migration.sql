@@ -6,7 +6,8 @@ CREATE TABLE migration_job (
     id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     engagement_id UUID NOT NULL REFERENCES engagement(id) ON DELETE CASCADE,
     job_type      TEXT NOT NULL CHECK (job_type IN
-                  ('account_unmanage_export','text_secret','file_secret','folder_structure','full')),
+                  ('account_local','account_domain','account_unmanage_export',
+                   'text_secret','file_secret','folder_structure','full')),
     mode          TEXT NOT NULL CHECK (mode IN ('dry_run','live')),
     status        TEXT NOT NULL DEFAULT 'queued'
                   CHECK (status IN ('queued','running','completed','failed','cancelled')),

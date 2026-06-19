@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  api, type Engagement, type SnapshotSummary, type InventoryItem, type ReconRow,
+  api, type Engagement, type SnapshotSummary, type InventoryItem, type ReconRow, type Metrics,
 } from "../lib/api";
+import {
+  PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer,
+} from "recharts";
 
 export function Dashboard() {
   const [ready, setReady] = useState<boolean | null>(null);
@@ -9,6 +12,7 @@ export function Dashboard() {
   const [engagementId, setEngagementId] = useState("");
   const [summaries, setSummaries] = useState<SnapshotSummary[]>([]);
   const [recon, setRecon] = useState<ReconRow[]>([]);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [drillSnapshot, setDrillSnapshot] = useState<string | null>(null);
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [typeFilter, setTypeFilter] = useState<string>("");
@@ -28,6 +32,7 @@ export function Dashboard() {
     if (!id) return;
     api.inventorySummary(id).then(setSummaries).catch(() => setSummaries([]));
     api.reconciliation(id).then(setRecon).catch(() => setRecon([]));
+    api.metrics(id).then(setMetrics).catch(() => setMetrics(null));
   };
 
   useEffect(() => { loadSummary(engagementId); }, [engagementId]);
@@ -103,6 +108,8 @@ export function Dashboard() {
             </section>
           </div>
 
+          {metrics && <MetricsCharts m={metrics} />}
+
           {drillSnapshot && (
             <div className="panel" style={{ marginTop: 16 }}>
               <header className="page-head" style={{ marginBottom: 12 }}>
@@ -171,6 +178,98 @@ function Stat({ label, value, tone }: { label: string; value: number; tone: stri
     <div className="stat">
       <div className={`stat-value ${tone}`}>{value}</div>
       <div className="stat-label">{label}</div>
+    </div>
+  );
+}
+
+// ---- Overview metrics charts ----
+const ACCOUNT_COLORS: Record<string, string> = {
+  local_windows: "#4f8cff",
+  local_unix: "#37c8a8",
+  domain: "#b07cff",
+  multiplexed: "#e0b65c",
+};
+const ACCOUNT_LABELS: Record<string, string> = {
+  local_windows: "Local · Windows",
+  local_unix: "Local · Unix/SSH",
+  domain: "Domain",
+  multiplexed: "Multiplexed (no path)",
+};
+
+function MetricsCharts({ m }: { m: Metrics }) {
+  const accountData = m.accounts.map((a) => ({
+    name: ACCOUNT_LABELS[a.bucket] ?? a.bucket, value: a.n, key: a.bucket,
+  }));
+  const managedData = m.managed.map((x) => ({
+    name: x.is_managed ? "Managed" : "Unmanaged", value: x.n,
+    fill: x.is_managed ? "#37c8a8" : "#8a93a6",
+  }));
+  const progressData = m.progress.map((p) => ({
+    type: p.type, migrated: p.migrated, pending: Math.max(0, p.total - p.migrated),
+  }));
+  const svtData = m.sourceVsTarget.map((s) => ({ type: s.type, source: s.source, target: s.target }));
+
+  const hasAccounts = accountData.some((d) => d.value > 0);
+
+  return (
+    <div className="panel" style={{ marginTop: 16 }}>
+      <h2 style={{ marginTop: 0 }}>Metrics</h2>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 24 }}>
+
+        <div>
+          <div className="phase-no">ACCOUNT BREAKDOWN</div>
+          {hasAccounts ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie data={accountData} dataKey="value" nameKey="name" cx="50%" cy="50%"
+                  innerRadius={50} outerRadius={85} paddingAngle={2}>
+                  {accountData.map((d) => <Cell key={d.key} fill={ACCOUNT_COLORS[d.key] ?? "#888"} />)}
+                </Pie>
+                <Tooltip /><Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <p className="muted">No accounts in the latest inventory.</p>}
+        </div>
+
+        <div>
+          <div className="phase-no">MANAGED vs UNMANAGED</div>
+          {managedData.length ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie data={managedData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={85}>
+                  {managedData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                </Pie>
+                <Tooltip /><Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <p className="muted">No account data.</p>}
+        </div>
+
+        <div>
+          <div className="phase-no">MIGRATION PROGRESS</div>
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={progressData}>
+              <XAxis dataKey="type" tick={{ fontSize: 11 }} /><YAxis allowDecimals={false} />
+              <Tooltip /><Legend />
+              <Bar dataKey="migrated" stackId="a" fill="#37c8a8" />
+              <Bar dataKey="pending" stackId="a" fill="#8a93a6" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div>
+          <div className="phase-no">SOURCE vs TARGET</div>
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={svtData}>
+              <XAxis dataKey="type" tick={{ fontSize: 11 }} /><YAxis allowDecimals={false} />
+              <Tooltip /><Legend />
+              <Bar dataKey="source" fill="#4f8cff" />
+              <Bar dataKey="target" fill="#b07cff" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+      </div>
     </div>
   );
 }
