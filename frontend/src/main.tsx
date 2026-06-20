@@ -6,17 +6,16 @@ import { Engagements } from "./components/Engagements";
 import { Connections } from "./components/Connections";
 import { Migration } from "./components/Migration";
 import { Logs } from "./components/Logs";
-import { Setup } from "./components/Setup";
+import { Readiness } from "./components/Readiness";
 import "./index.css";
 
 function Shell() {
   const phases = [
     { to: "/", label: "Overview", end: true },
-    { to: "/setup", label: "Setup" },
+    { to: "/readiness", label: "Readiness" },
     { to: "/engagements", label: "Engagements" },
     { to: "/inventory", label: "Pre-migration" },
     { to: "/migrate", label: "Migration" },
-    { to: "/verify", label: "Verification" },
     { to: "/logs", label: "Logs" },
     { to: "/assistant", label: "Assistant" },
   ];
@@ -37,7 +36,9 @@ function Shell() {
       <main className="content">
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/setup" element={<Setup />} />
+          <Route path="/readiness" element={<Readiness />} />
+          <Route path="/setup" element={<Readiness />} />
+          <Route path="/verify" element={<Readiness />} />
           <Route path="/engagements" element={<Engagements />} />
           <Route path="/inventory" element={<Connections />} />
           <Route path="/connections" element={<Connections />} />
