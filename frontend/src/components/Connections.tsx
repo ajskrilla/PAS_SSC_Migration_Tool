@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, type Engagement, type TestConnectionResult } from "../lib/api";
+import { api, type Engagement, type TestConnectionResult, type SnapshotSummary } from "../lib/api";
+import { downloadInventoryCsv, printInventorySummary } from "../lib/inventoryExport";
 
 type Role = "source" | "target";
 
@@ -78,7 +79,98 @@ export function Connections() {
           <ConnectionCard role="target" engagementId={engagementId} />
         </div>
       )}
+
+      {engagementId && (
+        <InventoryExport
+          engagementId={engagementId}
+          engagement={engagements.find((e) => e.id === engagementId)}
+        />
+      )}
     </div>
+  );
+}
+
+function InventoryExport({
+  engagementId, engagement,
+}: {
+  engagementId: string; engagement?: Engagement;
+}) {
+  const [summary, setSummary] = useState<SnapshotSummary | null>(null);
+  const [busy, setBusy] = useState<"csv" | "pdf" | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Load the source snapshot summary so we know whether an inventory exists + show counts.
+  useEffect(() => {
+    setSummary(null); setErr(null);
+    api.inventorySummary(engagementId)
+      .then((rows) => setSummary(rows.find((r) => r.role === "source") ?? null))
+      .catch((e) => setErr(String(e)));
+  }, [engagementId]);
+
+  const baseName = () => {
+    const cust = (engagement?.customer_name || "customer").replace(/[^\w.-]+/g, "_");
+    const stamp = new Date().toISOString().slice(0, 10);
+    return `${cust}_vault_inventory_${stamp}`;
+  };
+
+  const exportCsv = async () => {
+    if (!summary) return;
+    setBusy("csv"); setErr(null);
+    try {
+      const items = await api.snapshotItems(summary.snapshot_id);
+      downloadInventoryCsv(items, baseName());
+    } catch (e) {
+      setErr(`CSV export failed: ${String(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const exportPdf = () => {
+    if (!summary) return;
+    setBusy("pdf"); setErr(null);
+    try {
+      printInventorySummary(summary, {
+        engagementName: engagement?.name || "Engagement",
+        customerName: engagement?.customer_name || "Customer",
+      });
+    } catch (e) {
+      setErr(`Summary export failed: ${String(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="panel" style={{ marginTop: 16 }}>
+      <div className="phase-no">INVENTORY EXPORT</div>
+      <h2 style={{ marginTop: 0 }}>Export the captured inventory</h2>
+      {!summary ? (
+        <p className="muted">
+          {err
+            ? err
+            : "No source inventory captured yet. Run inventory on the PAS connection above, then export here."}
+        </p>
+      ) : (
+        <>
+          <p className="muted">
+            Source snapshot captured {new Date(summary.captured_at).toLocaleString()} —{" "}
+            {summary.summary.total} items ({summary.summary.accounts} accounts,{" "}
+            {summary.summary.managed} managed). The CSV lists every secret; the summary report is a
+            one-page overview for the customer.
+          </p>
+          <div className="conn-actions">
+            <button className="btn" onClick={exportCsv} disabled={busy !== null}>
+              {busy === "csv" ? "Exporting…" : "Export secret list (CSV)"}
+            </button>
+            <button className="btn ghost" onClick={exportPdf} disabled={busy !== null}>
+              {busy === "pdf" ? "Opening…" : "Export summary report (PDF)"}
+            </button>
+          </div>
+          {err && <div className="result bad" style={{ marginTop: 10 }}>{err}</div>}
+        </>
+      )}
+    </section>
   );
 }
 
