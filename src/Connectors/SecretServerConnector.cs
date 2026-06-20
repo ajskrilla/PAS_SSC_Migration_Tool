@@ -382,7 +382,7 @@ public sealed class SecretServerConnector
     }
 
     /// <summary>
-    /// Upload a file to a secret's file field via POST /secrets/{id}/fields/{slug} (multipart).
+    /// Upload a file to a secret's file field via PUT /secrets/{id}/fields/{slug} (multipart).
     /// Used instead of inlining base64 on create, which Secret Server caps in length.
     /// </summary>
     private async Task UploadSecretFileAsync(
@@ -396,10 +396,13 @@ public sealed class SecretServerConnector
         // Secret Server expects the file part named "file" with the filename.
         content.Add(fileContent, "file", filename);
 
-        var req = SsRequest(HttpMethod.Post, $"/secrets/{secretId}/fields/{slug}");
+        // Probe against the dzntz tenant confirmed this field-file upload uses PUT, not POST.
+        // POST routed to a handler that tried to bind the body as [0].Key/[0].Value pairs and
+        // returned 405. PUT /secrets/{id}/fields/{slug} with a multipart part named "file" works.
+        var req = SsRequest(HttpMethod.Put, $"/secrets/{secretId}/fields/{slug}");
         req.Content = content;  // multipart, not JSON
         using var resp = await _http.SendAsync(req, ct);
-        await EnsureOk(resp, "POST", $"/secrets/{secretId}/fields/{slug}", ct);
+        await EnsureOk(resp, "PUT", $"/secrets/{secretId}/fields/{slug}", ct);
     }
 
     /// <summary>
