@@ -1,18 +1,22 @@
 :root {
-  --bg: #0f1419;
-  --surface: #1a212b;
-  --surface-2: #222b37;
-  --line: #2d3744;
-  --text: #e4e9ef;
-  --muted: #8a97a6;
-  --accent: #4cc2a0;        /* Delinea-adjacent teal/green, used sparingly as a signal */
-  --accent-dim: #2d7a64;
-  --ok: #4cc2a0;
-  --bad: #e06b5c;
-  --warn: #d9a441;
+  /* Delinea Platform palette: deep indigo base + spring-green accent (from brand logo). */
+  --bg: #1c1340;            /* deep indigo, app background (logo backdrop ~#2D2160, darkened) */
+  --surface: #251a52;       /* panel/card surface, a step up from bg */
+  --surface-2: #2f2363;     /* hover / secondary surface */
+  --line: #3b2f70;          /* borders on indigo */
+  --text: #ece9f7;          /* near-white with a faint violet tint */
+  --muted: #9a92c0;         /* muted lavender-grey for secondary text */
+  --accent: #23e57e;        /* Delinea spring green (logo wordmark/fill) */
+  --accent-dim: #178f50;    /* darker green for fills/borders behind text */
+  --ok: #23e57e;
+  --bad: #f0675c;
+  --warn: #e6b04a;
   --radius: 8px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
   --sans: "Inter", system-ui, -apple-system, sans-serif;
+  /* shared chart greens so recharts fills track the brand */
+  --chart-green: #23e57e;
+  --chart-green-dim: #178f50;
 }
 
 * { box-sizing: border-box; }
@@ -67,7 +71,7 @@ table.data tr:last-child td { border-bottom: none; }
 .tag { font-size: 11px; font-family: var(--mono); padding: 2px 8px; border-radius: 4px; }
 .tag.planning { background: var(--surface-2); color: var(--muted); }
 .tag.active { background: var(--accent-dim); color: var(--text); }
-.tag.completed { background: #2d4a5a; color: var(--text); }
+.tag.completed { background: #3a2d6e; color: var(--text); }
 .bad-note { border-color: var(--bad); color: var(--bad); }
 
 @media (max-width: 700px) {
@@ -95,7 +99,7 @@ table.data tr:last-child td { border-bottom: none; }
 
 .cred-block {
   border: 1px dashed var(--line); border-radius: 6px; padding: 12px;
-  display: flex; flex-direction: column; gap: 10px; background: rgba(76,194,160,0.03);
+  display: flex; flex-direction: column; gap: 10px; background: rgba(35,229,126,0.05);
 }
 .cred-label {
   font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
@@ -113,7 +117,7 @@ table.data tr:last-child td { border-bottom: none; }
 .btn.ghost:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
 
 .result { font-size: 13px; padding: 8px 12px; border-radius: 6px; line-height: 1.4; word-break: break-word; }
-.result.ok { background: rgba(76,194,160,0.1); color: var(--ok); border: 1px solid var(--accent-dim); }
+.result.ok { background: rgba(35,229,126,0.1); color: var(--ok); border: 1px solid var(--accent-dim); }
 .result.bad { background: rgba(224,107,92,0.1); color: var(--bad); border: 1px solid var(--bad); }
 
 /* ---- Engagements create form ---- */
@@ -153,4 +157,55 @@ table.data tr:last-child td { border-bottom: none; }
 /* ---- Logs ---- */
 .log-detail { max-width: 520px; font-family: var(--mono); font-size: 12px; word-break: break-word; }
 .tag.ok { background: var(--accent-dim); color: var(--text); }
-.tag.bad { background: rgba(224,107,92,0.2); color: var(--bad); }
+.tag.bad { background: rgba(240,103,92,0.2); color: var(--bad); }
+
+/* ---- PDF export header (screen-hidden, print-visible) ---- */
+.print-only { display: none; }
+.export-head { display: flex; align-items: center; gap: 10px; }
+
+/* ---- Setup / prerequisites page ---- */
+.setup-progress { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+.setup-progress-bar { flex: 1; height: 8px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 999px; overflow: hidden; }
+.setup-progress-fill { height: 100%; background: var(--accent); transition: width .2s ease; }
+.setup-done { color: var(--accent); font-weight: 600; }
+.setup-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.setup-row { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 6px; cursor: pointer; transition: border-color .12s, background .12s; }
+.setup-row:hover { border-color: var(--accent); background: var(--surface-2); }
+.setup-row.checked { border-color: var(--accent-dim); background: rgba(35,229,126,0.05); }
+.setup-row input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
+  margin-top: 1px; flex: 0 0 auto; cursor: pointer; }
+.setup-label { font-weight: 600; font-size: 14px; }
+.setup-row.checked .setup-label { color: var(--accent); }
+.setup-detail { font-size: 12px; margin-top: 3px; line-height: 1.5; }
+.setup-steps { margin: 4px 0 0; padding-left: 20px; line-height: 1.7; }
+.setup-steps li { margin-bottom: 4px; }
+.setup-steps code, .setup-detail code, .setup-bullets code {
+  font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 5px; color: var(--accent); }
+.setup-bullets { margin: 4px 0 0; padding-left: 20px; line-height: 1.6; }
+.setup-bullets li { margin-bottom: 6px; }
+.setup-steps a, .setup-bullets a { color: var(--accent); }
+
+/* ---- Print: Dashboard overview -> PDF via browser "Save as PDF" ---- */
+@media print {
+  /* Force light background so charts/text read well on paper. */
+  :root {
+    --bg: #ffffff; --surface: #ffffff; --surface-2: #f3f2f8;
+    --line: #d6d2e6; --text: #16112e; --muted: #5b5478;
+    --accent-dim: #178f50;
+  }
+  @page { margin: 14mm; size: auto; }
+  body { background: #fff; }
+  /* Hide app chrome and interactive-only bits. */
+  .rail, .no-print, .btn, .page-head .pill { display: none !important; }
+  .app { grid-template-columns: 1fr; }
+  .content { padding: 0; overflow: visible; }
+  .print-only { display: block; }
+  /* Avoid splitting a panel across pages where possible. */
+  .panel { break-inside: avoid; border-color: var(--line); }
+  .grid { break-inside: avoid; }
+  /* recharts renders inline SVG; make sure colors aren't stripped. */
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+}

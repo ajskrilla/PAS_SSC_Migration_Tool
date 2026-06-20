@@ -6,11 +6,13 @@ import { Engagements } from "./components/Engagements";
 import { Connections } from "./components/Connections";
 import { Migration } from "./components/Migration";
 import { Logs } from "./components/Logs";
+import { Setup } from "./components/Setup";
 import "./index.css";
 
 function Shell() {
   const phases = [
     { to: "/", label: "Overview", end: true },
+    { to: "/setup", label: "Setup" },
     { to: "/engagements", label: "Engagements" },
     { to: "/inventory", label: "Pre-migration" },
     { to: "/migrate", label: "Migration" },
@@ -35,6 +37,7 @@ function Shell() {
       <main className="content">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/setup" element={<Setup />} />
           <Route path="/engagements" element={<Engagements />} />
           <Route path="/inventory" element={<Connections />} />
           <Route path="/connections" element={<Connections />} />

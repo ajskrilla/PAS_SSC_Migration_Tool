@@ -52,6 +52,15 @@ export function Dashboard() {
   const source = summaries.find((s) => s.role === "source");
   const target = summaries.find((s) => s.role === "target");
 
+  const selectedEngagement = engagements.find((e) => e.id === engagementId);
+  const exportPdf = () => {
+    // Browser print -> "Save as PDF". Print CSS (index.css @media print) hides the
+    // nav rail / buttons / API pill and forces a light theme so charts read on paper.
+    // recharts renders inline SVG that prints fine from the live window (cloning into a
+    // detached window collapses ResponsiveContainer width to 0 -> blank charts).
+    window.print();
+  };
+
   const reconCounts = recon.reduce<Record<string, number>>((acc, r) => {
     acc[r.match_status] = (acc[r.match_status] || 0) + 1; return acc;
   }, {});
@@ -60,12 +69,27 @@ export function Dashboard() {
     <div>
       <header className="page-head">
         <h1>Migration overview</h1>
-        <span className={`pill ${ready ? "ok" : ready === false ? "bad" : ""}`}>
-          API {ready === null ? "checking…" : ready ? "ready" : "unreachable"}
-        </span>
+        <div className="export-head">
+          <span className={`pill ${ready ? "ok" : ready === false ? "bad" : ""}`}>
+            API {ready === null ? "checking…" : ready ? "ready" : "unreachable"}
+          </span>
+          {(source || target) && (
+            <button className="btn small ghost" onClick={exportPdf}>Export PDF</button>
+          )}
+        </div>
       </header>
 
-      <div className="panel" style={{ marginBottom: 16 }}>
+      <div className="print-only" style={{ marginBottom: 16 }}>
+        <h1 style={{ margin: "0 0 4px" }}>Migration Overview</h1>
+        <p className="muted" style={{ margin: 0 }}>
+          {selectedEngagement
+            ? `${selectedEngagement.name} — ${selectedEngagement.customer_name}`
+            : "All engagements"}
+          {" · "}Generated {new Date().toLocaleString()}
+        </p>
+      </div>
+
+      <div className="panel no-print" style={{ marginBottom: 16 }}>
         <label className="field">
           <span>Engagement</span>
           {engagements.length ? (
@@ -184,10 +208,10 @@ function Stat({ label, value, tone }: { label: string; value: number; tone: stri
 
 // ---- Overview metrics charts ----
 const ACCOUNT_COLORS: Record<string, string> = {
-  local_windows: "#4f8cff",
-  local_unix: "#37c8a8",
-  domain: "#b07cff",
-  multiplexed: "#e0b65c",
+  local_windows: "#5b9bff",
+  local_unix: "#23e57e",
+  domain: "#b98cff",
+  multiplexed: "#e6b04a",
 };
 const ACCOUNT_LABELS: Record<string, string> = {
   local_windows: "Local · Windows",
@@ -202,7 +226,7 @@ function MetricsCharts({ m }: { m: Metrics }) {
   }));
   const managedData = m.managed.map((x) => ({
     name: x.is_managed ? "Managed" : "Unmanaged", value: x.n,
-    fill: x.is_managed ? "#37c8a8" : "#8a93a6",
+    fill: x.is_managed ? "#23e57e" : "#9a92c0",
   }));
   const progressData = m.progress.map((p) => ({
     type: p.type, migrated: p.migrated, pending: Math.max(0, p.total - p.migrated),
@@ -251,8 +275,8 @@ function MetricsCharts({ m }: { m: Metrics }) {
             <BarChart data={progressData}>
               <XAxis dataKey="type" tick={{ fontSize: 11 }} /><YAxis allowDecimals={false} />
               <Tooltip /><Legend />
-              <Bar dataKey="migrated" stackId="a" fill="#37c8a8" />
-              <Bar dataKey="pending" stackId="a" fill="#8a93a6" />
+              <Bar dataKey="migrated" stackId="a" fill="#23e57e" />
+              <Bar dataKey="pending" stackId="a" fill="#9a92c0" />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -263,8 +287,8 @@ function MetricsCharts({ m }: { m: Metrics }) {
             <BarChart data={svtData}>
               <XAxis dataKey="type" tick={{ fontSize: 11 }} /><YAxis allowDecimals={false} />
               <Tooltip /><Legend />
-              <Bar dataKey="source" fill="#4f8cff" />
-              <Bar dataKey="target" fill="#b07cff" />
+              <Bar dataKey="source" fill="#5b9bff" />
+              <Bar dataKey="target" fill="#b98cff" />
             </BarChart>
           </ResponsiveContainer>
         </div>
