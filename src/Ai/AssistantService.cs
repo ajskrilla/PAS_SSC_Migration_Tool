@@ -198,11 +198,7 @@ public sealed class AssistantService(
 
         // Phase 3b: LLM narration — for open-ended questions and environment_summary
         yield return Phase("generating", "Generating response (CPU model)...");
-        // Keepalive comment — keeps nginx and the browser connection alive during
-        // long CPU inference. SSE spec: lines starting with ':' are comments, ignored by clients.
-        yield return ": keepalive
 
-";
 
         var messages = new List<ChatMessage>
         {
