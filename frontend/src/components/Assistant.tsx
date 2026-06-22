@@ -208,6 +208,38 @@ function RiskCard({ data }: { data: Record<string, unknown> }) {
   );
 }
 
+
+function EnvironmentCard({ data }: { data: Record<string, unknown> }) {
+  if (data.error) return <div className="direct-card warn-text">{String(data.error)}</div>;
+  const vault = data.vault_size as Record<string, number> ?? {};
+  const rec   = String(data.migration_recommendation ?? "");
+  const capturedAt = data.captured_at ? new Date(String(data.captured_at)).toLocaleString() : null;
+  const isHighManaged = (vault.managed_accounts ?? 0) >= 20000;
+
+  return (
+    <div className="direct-card">
+      {capturedAt && <p className="muted" style={{fontSize:".75rem",marginBottom:".6rem"}}>Inventory captured: {capturedAt}</p>}
+
+      <div className="env-grid">
+        <div className="env-stat"><span className="env-num">{(vault.total ?? 0).toLocaleString()}</span><span className="env-lbl">Total items</span></div>
+        <div className="env-stat"><span className="env-num">{(vault.text_secrets ?? 0).toLocaleString()}</span><span className="env-lbl">Text secrets</span></div>
+        <div className="env-stat"><span className="env-num">{(vault.file_secrets ?? 0).toLocaleString()}</span><span className="env-lbl">File secrets</span></div>
+        <div className="env-stat">
+          <span className={"env-num " + (isHighManaged ? "warn-text" : "")}>
+            {(vault.managed_accounts ?? 0).toLocaleString()}
+          </span>
+          <span className="env-lbl">Managed accounts</span>
+        </div>
+      </div>
+
+      <div className={"env-rec " + (isHighManaged ? "env-rec-warn" : "env-rec-ok")}>
+        <span className="fix-label">{isHighManaged ? "⚠ " : "✓ "}Recommendation: </span>
+        {rec}
+      </div>
+    </div>
+  );
+}
+
 function DirectCard({ tool, data }: { tool: string | null; data: Record<string, unknown> }) {
   if (data.error) return <div className="direct-card warn-text">{String(data.error)}</div>;
   if (tool === "check_prerequisites")   return <PrereqCard data={data} />;
@@ -215,6 +247,7 @@ function DirectCard({ tool, data }: { tool: string | null; data: Record<string, 
   if (tool === "reconciliation_status") return <ReconCard data={data} />;
   if (tool === "explain_failures")      return <FailureCard data={data} />;
   if (tool === "risk_scan")             return <RiskCard data={data} />;
+  if (tool === "environment_summary")   return <EnvironmentCard data={data} />;
   return <pre className="direct-raw">{JSON.stringify(data, null, 2)}</pre>;
 }
 

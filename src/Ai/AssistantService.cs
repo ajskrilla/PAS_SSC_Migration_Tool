@@ -118,7 +118,8 @@ public static class KeywordRouter
             best == "check_prerequisites"   ||
             best == "migration_stats"       ||
             best == "reconciliation_status" ||
-            best == "risk_scan"
+            best == "risk_scan"             ||
+            best == "environment_summary"
         );
         // explain_failures always goes through LLM for narration
 
