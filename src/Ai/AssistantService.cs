@@ -127,8 +127,8 @@ public sealed class AssistantService(
             catch (Exception ex)
             {
                 log.LogError("Tool {Tool} failed: {Message}", toolName, ex.Message);
-                yield return Sse("error", new { message = $"Tool error: {ex.Message}" });
-                yield break;
+                // Cannot yield inside catch — store error and fall through
+                toolResult = new { error = $"Tool failed: {ex.Message}" };
             }
         }
 
