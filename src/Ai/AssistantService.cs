@@ -105,7 +105,7 @@ public sealed class AssistantService(
         }
 
         if (toolName is not null)
-            yield return Sse("tool", new { tool = toolName });
+            yield return SseTool(toolName);
 
         // 2. Run tool
         object? toolResult = null;
@@ -172,17 +172,22 @@ public sealed class AssistantService(
         await foreach (var token in ollama.ChatStreamAsync(messages, ct))
         {
             if (ct.IsCancellationRequested) yield break;
-            yield return Sse("token", new { text = token });
+            yield return SseToken(token);
         }
 
-        yield return Sse("done", new { });
+        yield return SseDone();
     }
 
-    private static string Sse(string type, object payload) =>
-        $"data: {JsonSerializer.Serialize(new Dictionary<string, object> { ["type"] = type }
-            .Concat(JsonSerializer.Deserialize<Dictionary<string, object>>(
-                JsonSerializer.Serialize(payload)) ?? [])
-            .ToDictionary(k => k.Key, v => v.Value))}\n\n";
+    private static string SseTool(string tool) =>
+        $"data: {{"type":"tool","tool":{JsonSerializer.Serialize(tool)}}}\n\n";
+
+    private static string SseToken(string text) =>
+        $"data: {{"type":"token","text":{JsonSerializer.Serialize(text)}}}\n\n";
+
+    private static string SseError(string message) =>
+        $"data: {{"type":"error","message":{JsonSerializer.Serialize(message)}}}\n\n";
+
+    private static string SseDone() => "data: {"type":"done"}\n\n";
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────────────
