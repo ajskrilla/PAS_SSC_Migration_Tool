@@ -179,15 +179,15 @@ public sealed class AssistantService(
     }
 
     private static string SseTool(string tool) =>
-        $"data: {{"type":"tool","tool":{JsonSerializer.Serialize(tool)}}}\n\n";
+        "data: {\"type\":\"tool\",\"tool\":" + JsonSerializer.Serialize(tool) + "}\n\n";
 
     private static string SseToken(string text) =>
-        $"data: {{"type":"token","text":{JsonSerializer.Serialize(text)}}}\n\n";
+        "data: {\"type\":\"token\",\"text\":" + JsonSerializer.Serialize(text) + "}\n\n";
 
     private static string SseError(string message) =>
-        $"data: {{"type":"error","message":{JsonSerializer.Serialize(message)}}}\n\n";
+        "data: {\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(message) + "}\n\n";
 
-    private static string SseDone() => "data: {"type":"done"}\n\n";
+    private static string SseDone() => "data: {\"type\":\"done\"}\n\n";
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────────────
