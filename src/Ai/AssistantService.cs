@@ -72,7 +72,18 @@ public static class KeywordRouter
         ("recent_activity", new[]
         {
             "recent", "activity", "happening", "event", "log", "last",
-            "what happened", "history", "failed", "error", "issue"
+            "what happened", "history"
+        }),
+        ("explain_failures", new[]
+        {
+            "fail", "failed", "error", "wrong", "broke", "issue", "problem",
+            "why", "what went", "not working", "fix", "debug", "diagnos"
+        }),
+        ("risk_scan", new[]
+        {
+            "risk", "scan", "ready", "safe to migrate", "before migrat",
+            "check before", "potential issue", "warning", "concern", "duplicate",
+            "large file", "problem"
         }),
     ];
 
@@ -104,10 +115,12 @@ public static class KeywordRouter
         // Direct (no LLM) for pure data-lookup questions — these benefit from
         // structured rendering, not prose narration, and are instant.
         bool direct = bestScore >= 1 && (
-            best == "check_prerequisites" ||
-            best == "migration_stats"     ||
-            best == "reconciliation_status"
+            best == "check_prerequisites"   ||
+            best == "migration_stats"       ||
+            best == "reconciliation_status" ||
+            best == "risk_scan"
         );
+        // explain_failures always goes through LLM for narration
 
         return (best, direct);
     }
@@ -159,6 +172,8 @@ public sealed class AssistantService(
                     "environment_summary"   => await tools.EnvironmentSummaryAsync(engagementId),
                     "reconciliation_status" => await tools.ReconciliationStatusAsync(engagementId),
                     "recent_activity"       => await tools.RecentActivityAsync(engagementId),
+                    "explain_failures"      => await new AssistantTools2(db).ExplainFailuresAsync(engagementId),
+                    "risk_scan"             => await new AssistantTools2(db).RiskScanAsync(engagementId),
                     _                       => null
                 };
             }

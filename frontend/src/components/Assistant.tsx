@@ -129,11 +129,92 @@ function ReconCard({ data }: { data: Record<string, unknown> }) {
   );
 }
 
+
+function FailureCard({ data }: { data: Record<string, unknown> }) {
+  if (data.message) return <div className="direct-card ok-text">{String(data.message)}</div>;
+  const groups = data.error_groups as {
+    error_pattern: string; count: number; title: string;
+    explanation: string; fix: string;
+    affected_items: { name: string; type: string; raw_error: string }[];
+    has_more: boolean;
+  }[] ?? [];
+  return (
+    <div className="direct-card">
+      <div className="failure-summary">
+        <span className="warn-text" style={{fontWeight:700, fontSize:"1.1rem"}}>{String(data.total_failed)}</span>
+        <span className="muted"> failed item(s)</span>
+      </div>
+      {groups.map((g, i) => (
+        <div key={i} className="failure-group">
+          <div className="failure-group-header">
+            <span className="warn-text failure-count">{g.count}×</span>
+            <span className="failure-title">{g.title}</span>
+          </div>
+          <p className="failure-explain">{g.explanation}</p>
+          <div className="failure-fix">
+            <span className="fix-label">Fix: </span>{g.fix}
+          </div>
+          <div className="failure-items">
+            {g.affected_items.map((item, j) => (
+              <div key={j} className="failure-item">
+                <span className="failure-item-name">{item.name}</span>
+                <span className="failure-item-err muted">{item.raw_error?.slice(0, 120)}</span>
+              </div>
+            ))}
+            {g.has_more && <span className="muted">…and more</span>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RiskCard({ data }: { data: Record<string, unknown> }) {
+  const risks = data.risks as {
+    risk: string; severity: string; title: string;
+    description: string; advice: string;
+    items?: { name: string; size_mb?: number }[];
+  }[] ?? [];
+  const overall = String(data.overall ?? "");
+  const isClean = risks.length === 0;
+  return (
+    <div className="direct-card">
+      <div className={"risk-overall " + (isClean ? "ok-text" : overall.includes("High") ? "warn-text" : "")}>
+        {isClean ? "✓ " : "⚠ "}{overall}
+      </div>
+      <div className="risk-stats muted" style={{fontSize:".8rem", marginBottom:".5rem"}}>
+        {String(data.total_items ?? 0)} total items · {String(data.managed_accounts ?? 0)} managed accounts
+      </div>
+      {risks.map((r, i) => (
+        <div key={i} className={"risk-item severity-" + r.severity}>
+          <div className="risk-item-header">
+            <span className={"risk-badge " + r.severity}>{r.severity}</span>
+            <span className="risk-title">{r.title}</span>
+          </div>
+          <p className="risk-desc">{r.description}</p>
+          <p className="risk-advice"><span className="fix-label">Advice: </span>{r.advice}</p>
+          {r.items && r.items.length > 0 && (
+            <div className="risk-items">
+              {r.items.slice(0, 5).map((item, j) => (
+                <span key={j} className="risk-item-name muted">
+                  {item.name}{item.size_mb ? ` (${item.size_mb}MB)` : ""}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function DirectCard({ tool, data }: { tool: string | null; data: Record<string, unknown> }) {
   if (data.error) return <div className="direct-card warn-text">{String(data.error)}</div>;
-  if (tool === "check_prerequisites") return <PrereqCard data={data} />;
-  if (tool === "migration_stats")     return <StatsCard data={data} />;
+  if (tool === "check_prerequisites")   return <PrereqCard data={data} />;
+  if (tool === "migration_stats")       return <StatsCard data={data} />;
   if (tool === "reconciliation_status") return <ReconCard data={data} />;
+  if (tool === "explain_failures")      return <FailureCard data={data} />;
+  if (tool === "risk_scan")             return <RiskCard data={data} />;
   return <pre className="direct-raw">{JSON.stringify(data, null, 2)}</pre>;
 }
 
@@ -143,6 +224,7 @@ const STARTERS = [
   "What percentage of my vault has migrated, how many secrets, and what days did we migrate data?",
   "Take an overall look at my environment and suggest how I should approach the migration",
   "What failed in my last migration run and why?",
+  "Scan my environment for risks before I start migrating",
   "Recent activity — what has been happening in this engagement?",
   "Help",
 ];

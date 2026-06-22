@@ -186,3 +186,253 @@ public sealed class AssistantTools(IDbConnection db)
         return new { recent_events = rows };
     }
 }
+
+public sealed class AssistantTools2(IDbConnection db)
+{
+    // ── Tool 6: explain_failures ─────────────────────────────────────────────────────
+    // Pulls failed migration items + their error messages, groups by error pattern,
+    // and maps known patterns to explanations + fix steps. LLM narrates unknowns.
+
+    private static readonly (string Pattern, string Title, string Explanation, string Fix)[] KnownErrors =
+    [
+        ("405",
+         "HTTP 405 Method Not Allowed",
+         "The API endpoint was called with the wrong HTTP verb (GET/POST/PUT).",
+         "This is usually a Secret Server API version mismatch. Check which HTTP verb the endpoint requires for your tenant version. Common case: file upload needs PUT not POST."),
+
+        ("401",
+         "HTTP 401 Unauthorized",
+         "The API credentials were rejected or the token expired during a long migration run.",
+         "Re-test the connection on the Pre-migration page to refresh the session token, then re-run the migration."),
+
+        ("403",
+         "HTTP 403 Forbidden",
+         "The API service account does not have sufficient permissions for this action.",
+         "Verify the PAS account is in System Administrator role and the Secret Server account is in Secret Server Administrator role."),
+
+        ("404",
+         "HTTP 404 Not Found",
+         "A resource (folder, template, or secret) referenced during migration does not exist on the target.",
+         "Run a fresh inventory on the target first. If a template is missing, create it via the Pre-migration page before migrating."),
+
+        ("template",
+         "Template mismatch",
+         "The secret template selected for migration does not match the field structure of the source secret.",
+         "Verify the text template and file template selections on the Migration page. Use 'Create file template' if the file template is missing."),
+
+        ("folder",
+         "Folder creation failed",
+         "The staging folder or a parent folder could not be created on Secret Server.",
+         "Check that the SS service account has permission to create folders at the root level. Verify Unlimited Vault Access is enabled."),
+
+        ("inheritpermission",
+         "Folder permissions error",
+         "Folder inherit-permissions flag caused a conflict during nested folder creation.",
+         "This is a known issue with root-level folder creation. Ensure the staging folder is not set to inherit permissions from a non-existent parent."),
+
+        ("timeout",
+         "Request timeout",
+         "A tenant API call timed out, usually on large file uploads or slow networks.",
+         "Re-run the migration — failed items are tracked and will be retried. For persistent timeouts on large files, check network connectivity to the tenant."),
+
+        ("duplicate",
+         "Duplicate secret name",
+         "A secret with the same name already exists in the target folder.",
+         "Run a reconcile on the Pre-migration page to identify duplicates. You may need to revert partial migrations before re-running."),
+
+        ("password",
+         "Password field empty",
+         "The password/credential field was not populated on the migrated secret.",
+         "This can indicate a slug mismatch on the target template. Verify the template field slugs match what the migration expects (usually 'password' for text secrets)."),
+    ];
+
+    public async Task<object> ExplainFailuresAsync(Guid engagementId)
+    {
+        // Get failed migration items with their errors
+        var failed = (await db.QueryAsync(
+            @"SELECT mi.item_type, mi.source_name, mi.last_error,
+                     mj.job_type, mj.started_at
+              FROM migration_item mi
+              JOIN migration_job mj ON mj.id = mi.job_id
+              WHERE mi.engagement_id = @id
+                AND (mi.status = 'failed' OR mi.last_error IS NOT NULL)
+              ORDER BY mj.started_at DESC, mi.item_type
+              LIMIT 50",
+            new { id = engagementId }))
+            .Cast<IDictionary<string, object?>>().ToList();
+
+        if (failed.Count == 0)
+            return new { message = "No failed items found. The last migration run completed without errors.", failures = Array.Empty<object>() };
+
+        // Also get recent error events from the event log
+        var errorEvents = (await db.QueryAsync(
+            @"SELECT action, message, tenant_role, occurred_at
+              FROM event_log
+              WHERE engagement_id = @id AND outcome = 'error'
+              ORDER BY occurred_at DESC LIMIT 20",
+            new { id = engagementId }))
+            .Cast<IDictionary<string, object?>>().ToList();
+
+        // Group failures by error pattern and match to known errors
+        var grouped = failed
+            .GroupBy(f =>
+            {
+                var err = f["last_error"]?.ToString()?.ToLowerInvariant() ?? "";
+                var match = KnownErrors.FirstOrDefault(k => err.Contains(k.Pattern));
+                return match.Pattern ?? "unknown";
+            })
+            .Select(g =>
+            {
+                var pattern = g.Key;
+                var known = KnownErrors.FirstOrDefault(k => k.Pattern == pattern);
+                return new
+                {
+                    error_pattern = pattern,
+                    count = g.Count(),
+                    title = known.Title ?? "Unknown error",
+                    explanation = known.Explanation ?? "Error pattern not recognized — see raw errors below.",
+                    fix = known.Fix ?? "Review the raw error messages below and check the event log for more detail.",
+                    affected_items = g.Take(5).Select(f => new
+                    {
+                        name      = f["source_name"]?.ToString() ?? "(unknown)",
+                        type      = f["item_type"]?.ToString(),
+                        raw_error = f["last_error"]?.ToString(),
+                    }).ToList(),
+                    has_more = g.Count() > 5,
+                };
+            })
+            .OrderByDescending(g => g.count)
+            .ToList();
+
+        var summary = new
+        {
+            total_failed = failed.Count,
+            error_groups = grouped,
+            recent_error_events = errorEvents.Take(5).Select(e => new
+            {
+                action  = e["action"]?.ToString(),
+                message = e["message"]?.ToString(),
+                role    = e["tenant_role"]?.ToString(),
+                at      = e["occurred_at"]?.ToString(),
+            }).ToList(),
+        };
+
+        return summary;
+    }
+
+    // ── Tool 7: risk_scan ────────────────────────────────────────────────────────────
+    // Pre-migration scan: flags secrets likely to cause problems before the run starts.
+
+    public async Task<object> RiskScanAsync(Guid engagementId)
+    {
+        var snapshotId = await db.ExecuteScalarAsync<Guid?>(
+            @"SELECT s.id FROM inventory_snapshot s
+              JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+              WHERE s.engagement_id = @id AND tc.role = 'source'
+              ORDER BY s.captured_at DESC LIMIT 1",
+            new { id = engagementId });
+
+        if (snapshotId is null)
+            return new { error = "No source inventory captured yet. Run inventory first." };
+
+        var risks = new List<object>();
+
+        // 1. Large files (>50MB) — slow uploads, timeout risk
+        var largeFiles = await db.QueryAsync(
+            @"SELECT name, folder_path, size_bytes
+              FROM inventory_item
+              WHERE snapshot_id = @sid AND item_type = 'file_secret'
+                AND size_bytes > 52428800
+              ORDER BY size_bytes DESC LIMIT 10",
+            new { sid = snapshotId });
+
+        var largeList = largeFiles.Cast<IDictionary<string, object?>>().ToList();
+        if (largeList.Count > 0)
+            risks.Add(new
+            {
+                risk = "large_files",
+                severity = "medium",
+                title = "Large file secrets (>50MB)",
+                description = largeList.Count + " file secret(s) exceed 50MB. These may time out during upload on slow connections.",
+                advice = "These will still migrate — just be aware they take longer. If they fail, re-run; the migration is idempotent.",
+                items = largeList.Select(f => new
+                {
+                    name = f["name"]?.ToString(),
+                    size_mb = Math.Round(Convert.ToDouble(f["size_bytes"] ?? 0) / 1048576, 1),
+                }).ToList(),
+            });
+
+        // 2. Secrets with no folder (root-level) — may cause folder-structure issues
+        var noFolder = await db.ExecuteScalarAsync<int>(
+            @"SELECT COUNT(*) FROM inventory_item
+              WHERE snapshot_id = @sid
+                AND (folder_path IS NULL OR folder_path = '')
+                AND item_type != 'folder'",
+            new { sid = snapshotId });
+
+        if (noFolder > 0)
+            risks.Add(new
+            {
+                risk = "no_folder",
+                severity = "low",
+                title = "Root-level secrets (" + noFolder + ")",
+                description = noFolder + " secret(s) have no folder path and will land at the root of the staging folder.",
+                advice = "These migrate fine but won't have folder nesting on the target. Acceptable for most customers.",
+            });
+
+        // 3. Duplicate names within same folder — can cause conflicts
+        var dupes = await db.ExecuteScalarAsync<int>(
+            @"SELECT COUNT(*) FROM (
+                SELECT name, folder_path, COUNT(*) c
+                FROM inventory_item
+                WHERE snapshot_id = @sid AND item_type != 'folder'
+                GROUP BY name, folder_path HAVING COUNT(*) > 1
+              ) dupe",
+            new { sid = snapshotId });
+
+        if (dupes > 0)
+            risks.Add(new
+            {
+                risk = "duplicate_names",
+                severity = "high",
+                title = "Duplicate secret names (" + dupes + " groups)",
+                description = dupes + " group(s) of secrets share the same name within the same folder.",
+                advice = "Secret Server enforces unique names per folder. Duplicates will fail on the second import. Resolve naming conflicts before migrating.",
+            });
+
+        // 4. Very large total item counts — set expectations
+        var total = await db.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM inventory_item WHERE snapshot_id = @sid AND item_type != 'folder'",
+            new { sid = snapshotId });
+
+        var managed = await db.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM inventory_item WHERE snapshot_id = @sid AND item_type = 'account' AND is_managed = true",
+            new { sid = snapshotId });
+
+        // 5. Managed accounts — always flag with context
+        if (managed > 0)
+            risks.Add(new
+            {
+                risk = "managed_accounts",
+                severity = managed > 20_000 ? "high" : "medium",
+                title = "Managed accounts (" + managed + ")",
+                description = "Managed accounts must be unmanaged in PAS before migration, then re-managed in Secret Server after.",
+                advice = managed > 20_000
+                    ? "Over 20,000 managed accounts — a dedicated account migration plan is required. Coordinate stakeholders and agree on a cutoff date before proceeding."
+                    : "Under 20,000 managed accounts — can be handled in a single migration day. Ensure all stakeholders know active password rotation will pause during migration.",
+            });
+
+        return new
+        {
+            total_items = total,
+            managed_accounts = managed,
+            risk_count = risks.Count,
+            risks,
+            overall = risks.Count == 0
+                ? "No significant risks detected. Ready to migrate."
+                : risks.Any(r => r.GetType().GetProperty("severity")?.GetValue(r)?.ToString() == "high")
+                    ? "High-severity risks detected — review before running migration."
+                    : "Low/medium risks only — review and proceed with awareness.",
+        };
+    }
+}
