@@ -1,11 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { api, Engagement } from "../lib/api";
 
+interface Phase { label: string; detail: string; done: boolean; }
+
 interface Turn {
   question: string;
   answer: string;
   toolUsed: string | null;
   isLoading?: boolean;
+  phases?: Phase[];
 }
 
 // ── Persist chat history in sessionStorage so navigation doesn't wipe it ──────
@@ -116,10 +119,19 @@ export function Assistant() {
           let msg: Record<string, string>;
           try { msg = JSON.parse(payload); } catch { continue; }
 
-          if (msg.type === "tool") {
+          if (msg.type === "phase") {
+            const newPhase: Phase = { label: msg.phase, detail: msg.detail, done: false };
+            setHistory(h => {
+              const prev = h[h.length - 1];
+              const oldPhases = prev?.phases ?? [];
+              // Mark previous phase done
+              const updatedPhases = [...oldPhases.map(p => ({ ...p, done: true })), newPhase];
+              return [...h.slice(0, -1), { ...prev, phases: updatedPhases }];
+            });
+          } else if (msg.type === "tool") {
             toolUsed = msg.tool;
             setHistory(h => [...h.slice(0, -1), {
-              question, answer: "", toolUsed, isLoading: true
+              ...h[h.length - 1], toolUsed, isLoading: true
             }]);
           } else if (msg.type === "token") {
             accumulated += msg.text;
@@ -127,9 +139,14 @@ export function Assistant() {
               question, answer: accumulated, toolUsed, isLoading: true
             }]);
           } else if (msg.type === "done") {
-            setHistory(h => [...h.slice(0, -1), {
-              question, answer: accumulated, toolUsed, isLoading: false
-            }]);
+            setHistory(h => {
+              const prev = h[h.length - 1];
+              return [...h.slice(0, -1), {
+                question, answer: accumulated, toolUsed,
+                phases: (prev?.phases ?? []).map(p => ({ ...p, done: true })),
+                isLoading: false,
+              }];
+            });
           } else if (msg.type === "error") {
             setHistory(h => [...h.slice(0, -1), {
               question, answer: `Error: ${msg.message}`, toolUsed: null, isLoading: false
@@ -216,17 +233,25 @@ export function Assistant() {
                     )}
                     {turn.isLoading && <span className="streaming-dot" />}
                   </span>
+                  {(turn.phases && turn.phases.length > 0) && (
+                    <div className="phase-timeline">
+                      {turn.phases.map((ph, pi) => (
+                        <div key={pi} className={"phase-step" + (ph.done ? " done" : " active")}>
+                          <span className="phase-icon">{ph.done ? "✓" : "●"}</span>
+                          <span className="phase-label">{ph.detail}</span>
+                          {!ph.done && <span className="streaming-dot" />}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {turn.answer ? (
                     <div className="ai-answer">
                       {turn.answer.split("\n").map((line, j) =>
                         line.trim() === "" ? <br key={j} /> : <p key={j}>{line}</p>
                       )}
                     </div>
-                  ) : turn.isLoading ? (
-                    <p className="thinking">
-                      {turn.toolUsed ? "Analysing data…" : "Thinking…"}
-                      <span className="thinking-note"> (CPU inference — tokens appear as they generate)</span>
-                    </p>
+                  ) : turn.isLoading && (!turn.phases || turn.phases.length === 0) ? (
+                    <p className="thinking">Starting up…</p>
                   ) : null}
                 </div>
               </div>

@@ -414,3 +414,41 @@ table.data tr:last-child td { border-bottom: none; }
   vertical-align: middle;
   animation: blink 1s ease-in-out infinite;
 }
+
+/* ── Phase timeline ──────────────────────────────────────────────────────── */
+.phase-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  margin-bottom: .6rem;
+  padding: .5rem .75rem;
+  background: var(--surface-3);
+  border-radius: calc(var(--radius) - 2px);
+  border-left: 2px solid var(--border);
+  font-size: .8rem;
+}
+
+.phase-step {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  color: var(--text-muted);
+  transition: color .2s;
+}
+
+.phase-step.done {
+  color: var(--accent);
+}
+
+.phase-step.active {
+  color: var(--text);
+}
+
+.phase-icon {
+  font-size: .7rem;
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.phase-label { flex: 1; }
