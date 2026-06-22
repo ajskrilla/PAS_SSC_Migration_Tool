@@ -163,16 +163,6 @@ export const api = {
       .then((r) => r.json() as Promise<{ cancelled?: boolean; message?: string }>),
 
 
-  assistantAsk: (
-    engagementId: string,
-    question: string,
-    history?: { question: string; answer: string }[],
-  ) =>
-    fetch(`/api/engagements/${engagementId}/assistant`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, history: history ?? [] }),
-    }).then(json<{ answer: string; toolUsed: string | null }>),
   migrationStatus: (engagementId: string) =>
     fetch(`/api/engagements/${engagementId}/migration-status`)
       .then(json<MigrationStatus>),

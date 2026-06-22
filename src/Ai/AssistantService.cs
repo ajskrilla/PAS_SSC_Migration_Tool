@@ -1,31 +1,29 @@
 using System.Data;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using Dapper;
 using Microsoft.Extensions.Logging;
 
 namespace PasMigration.Ai;
 
-// ── Tool catalog (descriptions used for embedding-based routing) ──────────────────────
+// ── Catalog + Router (unchanged from before) ──────────────────────────────────────────
 
 public sealed record ToolEntry(string Name, string Description);
 
-/// <summary>
-/// Singleton cache of catalog embeddings. Computed once on first request,
-/// reused for the lifetime of the process.
-/// </summary>
 public sealed class AssistantCatalog(ILlmProvider provider, ILogger<AssistantCatalog> log)
 {
     public static readonly ToolEntry[] Entries =
     [
         new("check_prerequisites",
-            "Check whether the migration prerequisites are met: connections tested, inventory captured, platform unified, UVA mode, admin roles, OAuth2 app"),
+            "Check whether migration prerequisites are met: connections tested, inventory captured, platform unified, UVA mode, admin roles, OAuth2 app"),
         new("migration_stats",
-            "Show migration progress statistics: how many secrets and accounts have been migrated, percentage complete, migration job history and dates"),
+            "Show migration progress: how many secrets and accounts migrated, percentage complete, migration job history and dates"),
         new("environment_summary",
-            "Summarise the source environment size: total secrets, accounts, managed account count, and recommend a migration approach or path"),
+            "Summarise the source vault size: total secrets, accounts, managed account count, recommend a migration approach"),
         new("reconciliation_status",
-            "Show reconciliation results: which items are matched, source-only, target-only, or in conflict between source and target"),
+            "Show reconciliation results: matched, source-only, target-only, or conflicted items between source and target"),
         new("recent_activity",
-            "Show recent activity and event log: what actions have been taken, outcomes, errors in this engagement"),
+            "Show recent activity and event log: actions taken, outcomes, errors in this engagement"),
     ];
 
     private float[][]? _cache;
@@ -34,7 +32,6 @@ public sealed class AssistantCatalog(ILlmProvider provider, ILogger<AssistantCat
     public async Task<float[][]> GetEmbeddingsAsync(CancellationToken ct)
     {
         if (_cache is not null) return _cache;
-
         await _lock.WaitAsync(ct);
         try
         {
@@ -50,134 +47,145 @@ public sealed class AssistantCatalog(ILlmProvider provider, ILogger<AssistantCat
     }
 }
 
-// ── Intent router ──────────────────────────────────────────────────────────────────────
-
 public sealed class AssistantRouter(ILlmProvider provider, AssistantCatalog catalog, ILogger<AssistantRouter> log)
 {
-    private const float ConfidenceThreshold = 0.55f;
+    private const float Threshold = 0.50f; // slightly lower than before — improves recall
 
-    /// <summary>
-    /// Returns the best-matching tool name, or null if confidence is below threshold.
-    /// </summary>
     public async Task<string?> RouteAsync(string question, CancellationToken ct)
     {
-        var questionEmb = await provider.EmbedAsync(question, ct);
-        var catalogEmbs = await catalog.GetEmbeddingsAsync(ct);
-
-        float best = float.MinValue;
-        int bestIdx = -1;
-
-        for (int i = 0; i < catalogEmbs.Length; i++)
+        var qEmb  = await provider.EmbedAsync(question, ct);
+        var cEmbs = await catalog.GetEmbeddingsAsync(ct);
+        float best = float.MinValue; int bestIdx = -1;
+        for (int i = 0; i < cEmbs.Length; i++)
         {
-            float sim = Cosine(questionEmb, catalogEmbs[i]);
+            float sim = Cosine(qEmb, cEmbs[i]);
             if (sim > best) { best = sim; bestIdx = i; }
         }
-
-        var toolName = bestIdx >= 0 ? AssistantCatalog.Entries[bestIdx].Name : null;
-        log.LogDebug("Router: best={Tool} score={Score:F3}", toolName, best);
-
-        return best >= ConfidenceThreshold ? toolName : null;
+        var name = bestIdx >= 0 ? AssistantCatalog.Entries[bestIdx].Name : null;
+        log.LogDebug("Router: tool={Tool} score={Score:F3}", name, best);
+        return best >= Threshold ? name : null;
     }
 
     private static float Cosine(float[] a, float[] b)
     {
-        if (a.Length != b.Length) return 0f;
         float dot = 0, na = 0, nb = 0;
-        for (int i = 0; i < a.Length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-        float denom = MathF.Sqrt(na) * MathF.Sqrt(nb);
-        return denom < 1e-8f ? 0f : dot / denom;
+        for (int i = 0; i < a.Length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+        float d = MathF.Sqrt(na) * MathF.Sqrt(nb);
+        return d < 1e-8f ? 0f : dot / d;
     }
 }
 
-// ── AssistantService (orchestrator) ───────────────────────────────────────────────────
+// ── AssistantService — streaming orchestrator ─────────────────────────────────────────
 
 public sealed class AssistantService(
-    ILlmProvider provider,
+    OllamaProvider ollama,
     AssistantRouter router,
     IDbConnection db,
     ILogger<AssistantService> log)
 {
-    public async Task<AssistantReply> AskAsync(
+    /// <summary>
+    /// Streams the assistant response as SSE lines:
+    ///   data: {"type":"tool","tool":"migration_stats"}
+    ///   data: {"type":"token","text":"Here is what I found…"}
+    ///   data: {"type":"done"}
+    ///   data: {"type":"error","message":"…"}
+    /// </summary>
+    public async IAsyncEnumerable<string> AskStreamAsync(
         Guid engagementId,
         string question,
         IReadOnlyList<ConversationTurn>? history,
-        CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct)
     {
-        // 1. Route the question to a tool (or fall through to help/general)
-        var toolName = await router.RouteAsync(question, ct);
-        log.LogInformation("Assistant: tool={Tool} engagement={Id}", toolName ?? "none", engagementId);
+        // 1. Route
+        string? toolName = null;
+        try { toolName = await router.RouteAsync(question, ct); }
+        catch (Exception ex)
+        {
+            log.LogWarning("Router failed: {Message}", ex.Message);
+        }
 
-        // 2. Run the tool and get structured data
+        if (toolName is not null)
+            yield return Sse("tool", new { tool = toolName });
+
+        // 2. Run tool
         object? toolResult = null;
         if (toolName is not null)
         {
-            var tools = new AssistantTools(db);
-            toolResult = toolName switch
+            try
             {
-                "check_prerequisites"   => await tools.CheckPrerequisitesAsync(engagementId),
-                "migration_stats"       => await tools.MigrationStatsAsync(engagementId),
-                "environment_summary"   => await tools.EnvironmentSummaryAsync(engagementId),
-                "reconciliation_status" => await tools.ReconciliationStatusAsync(engagementId),
-                "recent_activity"       => await tools.RecentActivityAsync(engagementId),
-                _ => null
-            };
+                var tools = new AssistantTools(db);
+                toolResult = toolName switch
+                {
+                    "check_prerequisites"   => await tools.CheckPrerequisitesAsync(engagementId),
+                    "migration_stats"       => await tools.MigrationStatsAsync(engagementId),
+                    "environment_summary"   => await tools.EnvironmentSummaryAsync(engagementId),
+                    "reconciliation_status" => await tools.ReconciliationStatusAsync(engagementId),
+                    "recent_activity"       => await tools.RecentActivityAsync(engagementId),
+                    _                       => null
+                };
+            }
+            catch (Exception ex)
+            {
+                log.LogError("Tool {Tool} failed: {Message}", toolName, ex.Message);
+                yield return Sse("error", new { message = $"Tool error: {ex.Message}" });
+                yield break;
+            }
         }
 
-        // 3. Build the message list for the model
+        // 3. Build messages — keep them lean for CPU inference
         var messages = new List<ChatMessage>
         {
             new(ChatRole.System, AssistantPrompt.System)
         };
 
-        // Include recent conversation turns for context (last 6)
+        // Last 4 turns only — reduces prompt size significantly on CPU
         if (history is { Count: > 0 })
         {
-            foreach (var turn in history.TakeLast(6))
+            foreach (var t in history.TakeLast(4))
             {
-                messages.Add(new(ChatRole.User,      turn.Question));
-                messages.Add(new(ChatRole.Assistant, turn.Answer));
+                messages.Add(new(ChatRole.User,      t.Question));
+                messages.Add(new(ChatRole.Assistant, t.Answer));
             }
         }
 
-        // Build the user message — include tool data if we have it
-        string userMessage;
-        if (toolResult is not null)
-        {
-            var json = JsonSerializer.Serialize(toolResult, new JsonSerializerOptions { WriteIndented = true });
-            userMessage = $"""
-                User question: {question}
+        string userMessage = toolResult is not null
+            ? $"""
+               User question: {question}
 
-                Tool used: {toolName}
-                Tool data (read-only, from the migration database):
-                {json}
+               Tool: {toolName}
+               Data:
+               {JsonSerializer.Serialize(toolResult, new JsonSerializerOptions { WriteIndented = true })}
 
-                Please narrate this data in plain language, interpreting what it means for the migration.
-                Be concise. Use bullet points where helpful. Do not invent any information not present above.
-                """;
-        }
-        else
-        {
-            userMessage = $"""
-                User question: {question}
+               Narrate this data in plain language. Be concise. Use bullet points.
+               Do not invent anything not in the data above.
+               """
+            : $"""
+               User question: {question}
 
-                No specific tool was matched. Answer from general knowledge about the PAS migration tool
-                and methodology. If the user is asking "help" or "what can you do", explain the five
-                capabilities: check prerequisites, migration statistics, environment summary and migration
-                path recommendation, reconciliation status, recent activity.
-                """;
-        }
+               Answer from your knowledge of the PAS → Secret Server migration tool and methodology.
+               If the user says "help", explain your five capabilities briefly.
+               """;
 
         messages.Add(new(ChatRole.User, userMessage));
 
-        // 4. Call the model
-        var result = await provider.ChatAsync(messages, null, ct);
+        // 4. Stream tokens
+        await foreach (var token in ollama.ChatStreamAsync(messages, ct))
+        {
+            if (ct.IsCancellationRequested) yield break;
+            yield return Sse("token", new { text = token });
+        }
 
-        return new AssistantReply(result.Content, toolName);
+        yield return Sse("done", new { });
     }
+
+    private static string Sse(string type, object payload) =>
+        $"data: {JsonSerializer.Serialize(new Dictionary<string, object> { ["type"] = type }
+            .Concat(JsonSerializer.Deserialize<Dictionary<string, object>>(
+                JsonSerializer.Serialize(payload)) ?? [])
+            .ToDictionary(k => k.Key, v => v.Value))}\n\n";
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────────────
 
 public sealed record ConversationTurn(string Question, string Answer);
-public sealed record AssistantReply(string Answer, string? ToolUsed);
 public sealed record AssistantRequest(string Question, IReadOnlyList<ConversationTurn>? History);

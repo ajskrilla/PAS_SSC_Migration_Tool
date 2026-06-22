@@ -37,7 +37,8 @@ builder.Services.AddHttpClient("ollama", (sp, c) =>
 });
 
 // AI layer - provider + catalog are singletons; router + service are scoped.
-builder.Services.AddSingleton<ILlmProvider, OllamaProvider>();
+builder.Services.AddSingleton<OllamaProvider>();              // concrete — needed for streaming
+builder.Services.AddSingleton<ILlmProvider>(sp => sp.GetRequiredService<OllamaProvider>());
 builder.Services.AddSingleton<AssistantCatalog>();
 builder.Services.AddScoped<AssistantRouter>();
 builder.Services.AddScoped<AssistantService>();
@@ -411,18 +412,20 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
     });
 
 
-// Assistant: read-only advisor endpoint.
+// Assistant: streaming SSE endpoint. Client reads token-by-token for real-time display.
 app.MapPost("/api/engagements/{id:guid}/assistant",
-    async (Guid id, AssistantRequest req, AssistantService svc, CancellationToken ct) =>
+    async (Guid id, AssistantRequest req, AssistantService svc, HttpResponse response, CancellationToken ct) =>
     {
-        try
+        response.Headers["Content-Type"]  = "text/event-stream";
+        response.Headers["Cache-Control"] = "no-cache";
+        response.Headers["X-Accel-Buffering"] = "no"; // disable nginx buffering
+        await response.Body.FlushAsync(ct);
+
+        await foreach (var chunk in svc.AskStreamAsync(id, req.Question, req.History, ct))
         {
-            var reply = await svc.AskAsync(id, req.Question, req.History, ct);
-            return Results.Ok(reply);
-        }
-        catch (Exception ex)
-        {
-            return Results.Problem($"Assistant error: {ex.Message}");
+            if (ct.IsCancellationRequested) break;
+            await response.WriteAsync(chunk, ct);
+            await response.Body.FlushAsync(ct);
         }
     });
 
