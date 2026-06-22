@@ -6,27 +6,17 @@ using Microsoft.Extensions.Logging;
 
 namespace PasMigration.Ai;
 
-// ── Tool catalog ──────────────────────────────────────────────────────────────────────
-
 public sealed record ToolEntry(string Name, string Description);
 
-/// <summary>
-/// Singleton that caches catalog embeddings. Only used if embedding router is active.
-/// </summary>
 public sealed class AssistantCatalog(ILlmProvider provider, ILogger<AssistantCatalog> log)
 {
     public static readonly ToolEntry[] Entries =
     [
-        new("check_prerequisites",
-            "Check whether migration prerequisites are met: connections tested, inventory captured, platform unified, UVA mode, admin roles, OAuth2 app"),
-        new("migration_stats",
-            "Show migration progress: how many secrets and accounts migrated, percentage complete, migration job history and dates"),
-        new("environment_summary",
-            "Summarise the source vault size: total secrets, accounts, managed account count, recommend a migration approach"),
-        new("reconciliation_status",
-            "Show reconciliation results: matched, source-only, target-only, or conflicted items between source and target"),
-        new("recent_activity",
-            "Show recent activity and event log: actions taken, outcomes, errors in this engagement"),
+        new("check_prerequisites",  "Check prerequisites, permissions, UVA mode, connections, OAuth2"),
+        new("migration_stats",      "Migration progress, percentage, counts, job history, dates"),
+        new("environment_summary",  "Vault size, account counts, migration approach recommendation"),
+        new("reconciliation_status","Reconciliation diff, matched, source-only, target-only, conflicts"),
+        new("recent_activity",      "Recent activity, event log, errors, what happened"),
     ];
 
     private float[][]? _cache;
@@ -39,7 +29,7 @@ public sealed class AssistantCatalog(ILlmProvider provider, ILogger<AssistantCat
         try
         {
             if (_cache is not null) return _cache;
-            log.LogInformation("Computing catalog embeddings ({Count} tools)...", Entries.Length);
+            log.LogInformation("Computing catalog embeddings...");
             var embeddings = new float[Entries.Length][];
             for (int i = 0; i < Entries.Length; i++)
                 embeddings[i] = await provider.EmbedAsync(Entries[i].Description, ct);
@@ -50,13 +40,8 @@ public sealed class AssistantCatalog(ILlmProvider provider, ILogger<AssistantCat
     }
 }
 
-// ── Keyword router (fast, no model call) ─────────────────────────────────────────────
+// ── Keyword router — instant, no model call ───────────────────────────────────────────
 
-/// <summary>
-/// Routes questions to tools using keyword matching — no embedding call needed.
-/// This saves ~2-5s per request on CPU compared to the embedding router.
-/// Falls back to null (general/help response) if nothing matches.
-/// </summary>
 public static class KeywordRouter
 {
     private static readonly (string Tool, string[] Keywords)[] Rules =
@@ -77,7 +62,7 @@ public static class KeywordRouter
         {
             "environment", "vault size", "how big", "approach", "path",
             "recommend", "suggest", "plan", "strategy", "should i",
-            "how should", "overview", "summary", "what do i have", "inventory"
+            "how should", "overview", "what do i have", "inventory", "size"
         }),
         ("reconciliation_status", new[]
         {
@@ -91,13 +76,19 @@ public static class KeywordRouter
         }),
     ];
 
-    public static string? Route(string question)
+    /// <summary>
+    /// Returns (toolName, useDirectFormat).
+    /// useDirectFormat=true means skip the LLM entirely and return structured JSON
+    /// for the frontend to render — instant response for data-lookup questions.
+    /// useDirectFormat=false means pass tool result through the LLM for narration.
+    /// </summary>
+    public static (string? Tool, bool Direct) Route(string question)
     {
-        var q = question.ToLowerInvariant();
+        var q = question.ToLowerInvariant().Trim();
 
-        // Help/general — no tool needed
-        if (q.TrimStart().StartsWith("help") || q == "help")
-            return null;
+        // Pure help — no tool, no LLM needed for basic capability listing
+        if (q is "help" or "?" or "what can you do" or "capabilities")
+            return (null, false);
 
         string? best = null;
         int bestScore = 0;
@@ -108,24 +99,31 @@ public static class KeywordRouter
             if (score > bestScore) { bestScore = score; best = tool; }
         }
 
-        return bestScore > 0 ? best : null;
+        if (best is null) return (null, false);
+
+        // Direct (no LLM) for pure data-lookup questions — these benefit from
+        // structured rendering, not prose narration, and are instant.
+        bool direct = bestScore >= 1 && (
+            best == "check_prerequisites" ||
+            best == "migration_stats"     ||
+            best == "reconciliation_status"
+        );
+
+        return (best, direct);
     }
 }
 
-// ── AssistantRouter (keeps embedding path available but unused by default) ────────────
-
 public sealed class AssistantRouter(ILlmProvider provider, AssistantCatalog catalog, ILogger<AssistantRouter> log)
 {
-    public Task<string?> RouteAsync(string question, CancellationToken ct)
+    public Task<(string? Tool, bool Direct)> RouteAsync(string question, CancellationToken ct)
     {
-        // Keyword routing — instant, no model call
         var result = KeywordRouter.Route(question);
-        log.LogDebug("Keyword router: tool={Tool}", result ?? "none");
+        log.LogDebug("Router: tool={Tool} direct={Direct}", result.Tool ?? "none", result.Direct);
         return Task.FromResult(result);
     }
 }
 
-// ── AssistantService — streaming orchestrator ─────────────────────────────────────────
+// ── AssistantService ──────────────────────────────────────────────────────────────────
 
 public sealed class AssistantService(
     OllamaProvider ollama,
@@ -133,31 +131,20 @@ public sealed class AssistantService(
     IDbConnection db,
     ILogger<AssistantService> log)
 {
-    /// <summary>
-    /// Streams SSE events:
-    ///   data: {"type":"phase","phase":"routing","detail":"..."}
-    ///   data: {"type":"tool","tool":"migration_stats"}
-    ///   data: {"type":"token","text":"Here is..."}
-    ///   data: {"type":"done"}
-    ///   data: {"type":"error","message":"..."}
-    /// </summary>
     public async IAsyncEnumerable<string> AskStreamAsync(
         Guid engagementId,
         string question,
         IReadOnlyList<ConversationTurn>? history,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        // Phase 1: Route (instant with keyword router)
         yield return Phase("routing", "Identifying relevant data...");
 
-        string? toolName = null;
-        try { toolName = await router.RouteAsync(question, ct); }
-        catch (Exception ex) { log.LogWarning("Router failed: {Message}", ex.Message); }
+        var (toolName, direct) = await router.RouteAsync(question, ct);
 
         if (toolName is not null)
             yield return Tool(toolName);
 
-        // Phase 2: Run tool (DB query — fast)
+        // Phase 2: fetch from DB
         object? toolResult = null;
         if (toolName is not null)
         {
@@ -178,12 +165,24 @@ public sealed class AssistantService(
             catch (Exception ex)
             {
                 log.LogError("Tool {Tool} failed: {Message}", toolName, ex.Message);
-                toolResult = new { error = "Tool query failed: " + ex.Message };
+                toolResult = new { error = "Query failed: " + ex.Message };
+                direct = false;
             }
         }
 
-        // Phase 3: Generate (slow — model inference on CPU)
-        yield return Phase("generating", "Generating response (CPU inference)...");
+        // Phase 3a: direct — emit structured data, skip LLM entirely
+        if (direct && toolResult is not null)
+        {
+            yield return Phase("rendering", "Formatting results...");
+            var json = JsonSerializer.Serialize(toolResult,
+                new JsonSerializerOptions { WriteIndented = false });
+            yield return DirectData(json);
+            yield return Done();
+            yield break;
+        }
+
+        // Phase 3b: LLM narration — for open-ended questions and environment_summary
+        yield return Phase("generating", "Generating response (CPU model)...");
 
         var messages = new List<ChatMessage>
         {
@@ -192,19 +191,19 @@ public sealed class AssistantService(
 
         if (history is { Count: > 0 })
         {
-            foreach (var t in history.TakeLast(4))
+            foreach (var t in history.TakeLast(2)) // trim to 2 turns for speed
             {
-                messages.Add(new(ChatRole.User, t.Question));
+                messages.Add(new(ChatRole.User,      t.Question));
                 messages.Add(new(ChatRole.Assistant, t.Answer));
             }
         }
 
         string userMessage = toolResult is not null
-            ? "User question: " + question + "\n\nTool: " + toolName + "\nData:\n" +
+            ? "Question: " + question + "\n\nData from " + toolName + ":\n" +
               JsonSerializer.Serialize(toolResult, new JsonSerializerOptions { WriteIndented = true }) +
-              "\n\nNarrate this data concisely. Use bullet points. Do not invent anything not in the data."
-            : "User question: " + question +
-              "\n\nAnswer from your knowledge of the PAS to Secret Server migration tool. If the user says 'help', list your five capabilities briefly.";
+              "\n\nGive a concise summary in plain text, 3-5 bullet points max. No markdown."
+            : "Question: " + question +
+              "\n\nAnswer briefly. If the user says 'help', list your five capabilities in 5 short lines.";
 
         messages.Add(new(ChatRole.User, userMessage));
 
@@ -217,7 +216,7 @@ public sealed class AssistantService(
         yield return Done();
     }
 
-    // ── SSE helpers — simple string concat, no interpolation ambiguity ────────────────
+    // ── SSE helpers ───────────────────────────────────────────────────────────────────
 
     private static string Phase(string phase, string detail) =>
         "data: {\"type\":\"phase\",\"phase\":" + JsonSerializer.Serialize(phase) +
@@ -229,11 +228,11 @@ public sealed class AssistantService(
     private static string Token(string text) =>
         "data: {\"type\":\"token\",\"text\":" + JsonSerializer.Serialize(text) + "}\n\n";
 
+    private static string DirectData(string json) =>
+        "data: {\"type\":\"direct\",\"data\":" + json + "}\n\n";
+
     private static string Done() =>
         "data: {\"type\":\"done\"}\n\n";
-
-    private static string Err(string message) =>
-        "data: {\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(message) + "}\n\n";
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────────────

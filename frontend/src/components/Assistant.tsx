@@ -7,25 +7,137 @@ interface Turn {
   question: string;
   answer: string;
   toolUsed: string | null;
+  directData: Record<string, unknown> | null;
   isLoading?: boolean;
   phases?: Phase[];
 }
 
-// ── Persist chat history in sessionStorage so navigation doesn't wipe it ──────
+// ── Persist across navigation ──────────────────────────────────────────────────
 const STORAGE_KEY = "assistant_state";
-interface PersistedState { engId: string; history: Turn[] }
-
-function loadState(): PersistedState {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : { engId: "", history: [] };
-  } catch { return { engId: "", history: [] }; }
+function loadState(): { engId: string; history: Turn[] } {
+  try { const r = sessionStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : { engId: "", history: [] }; }
+  catch { return { engId: "", history: [] }; }
 }
-
-function saveState(s: PersistedState) {
+function saveState(s: { engId: string; history: Turn[] }) {
   try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch { /* quota */ }
 }
 
+// ── Inline markdown renderer ───────────────────────────────────────────────────
+function renderMarkdown(text: string) {
+  return text.split("\n").map((line, i) => {
+    const trimmed = line.trim();
+    if (!trimmed) return <br key={i} />;
+
+    // Bold **text**
+    const parts = trimmed.split(/(\*\*[^*]+\*\*)/g).map((p, j) =>
+      p.startsWith("**") && p.endsWith("**")
+        ? <strong key={j}>{p.slice(2, -2)}</strong>
+        : p
+    );
+
+    // Bullet
+    if (trimmed.startsWith("* ") || trimmed.startsWith("- ") || trimmed.startsWith("+ "))
+      return <li key={i}>{parts.slice(1)}{/* drop bullet char */}
+               {trimmed.slice(2).split(/(\*\*[^*]+\*\*)/g).map((p, j) =>
+                 p.startsWith("**") && p.endsWith("**") ? <strong key={j}>{p.slice(2,-2)}</strong> : p
+               )}
+             </li>;
+
+    // Header
+    if (trimmed.startsWith("## ")) return <h4 key={i}>{trimmed.slice(3)}</h4>;
+    if (trimmed.startsWith("# "))  return <h3 key={i}>{trimmed.slice(2)}</h3>;
+
+    return <p key={i}>{parts}</p>;
+  });
+}
+
+// ── Direct data cards ─────────────────────────────────────────────────────────
+function PrereqCard({ data }: { data: Record<string, unknown> }) {
+  const entries = Object.entries(data);
+  return (
+    <div className="direct-card">
+      {entries.map(([key, val]) => {
+        const v = String(val);
+        const isOk = v.startsWith("ok") || v.startsWith("implied");
+        const isUnknown = v.startsWith("unknown");
+        const label = key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+        return (
+          <div key={key} className={"prereq-row " + (isOk ? "ok" : isUnknown ? "unknown" : "warn")}>
+            <span className="prereq-icon">{isOk ? "✓" : isUnknown ? "?" : "!"}</span>
+            <div>
+              <span className="prereq-key">{label}</span>
+              <span className="prereq-val">{v}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StatsCard({ data }: { data: Record<string, unknown> }) {
+  const pct = data.overall_percent_migrated as number ?? 0;
+  const byType = data.by_type as { item_type: string; total: number; migrated: number; failed: number; pending: number }[] ?? [];
+  return (
+    <div className="direct-card">
+      <div className="stats-pct-row">
+        <span className="stats-pct-num">{pct}%</span>
+        <span className="muted"> migrated overall</span>
+      </div>
+      <div className="progress-bar-wrap">
+        <div className="progress-bar-fill" style={{ width: pct + "%" }} />
+      </div>
+      {byType.length > 0 && (
+        <table className="stats-table">
+          <thead><tr><th>Type</th><th>Total</th><th>Migrated</th><th>Failed</th><th>Pending</th></tr></thead>
+          <tbody>
+            {byType.map((r, i) => (
+              <tr key={i}>
+                <td>{r.item_type?.replace(/_/g, " ")}</td>
+                <td>{r.total}</td>
+                <td className="ok-text">{r.migrated}</td>
+                <td className={r.failed > 0 ? "warn-text" : ""}>{r.failed}</td>
+                <td>{r.pending}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function ReconCard({ data }: { data: Record<string, unknown> }) {
+  const rows = data.reconciliation as { item_type: string; match_status: string; n: number }[] ?? [];
+  return (
+    <div className="direct-card">
+      <table className="stats-table">
+        <thead><tr><th>Type</th><th>Status</th><th>Count</th></tr></thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i}>
+              <td>{r.item_type?.replace(/_/g, " ")}</td>
+              <td className={r.match_status === "matched" ? "ok-text" : "warn-text"}>
+                {r.match_status?.replace(/_/g, " ")}
+              </td>
+              <td>{r.n}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function DirectCard({ tool, data }: { tool: string | null; data: Record<string, unknown> }) {
+  if (data.error) return <div className="direct-card warn-text">{String(data.error)}</div>;
+  if (tool === "check_prerequisites") return <PrereqCard data={data} />;
+  if (tool === "migration_stats")     return <StatsCard data={data} />;
+  if (tool === "reconciliation_status") return <ReconCard data={data} />;
+  return <pre className="direct-raw">{JSON.stringify(data, null, 2)}</pre>;
+}
+
+// ── Starter prompts ───────────────────────────────────────────────────────────
 const STARTERS = [
   "Please verify that my API accounts have the necessary permissions and that unlimited vault access is on",
   "What percentage of my vault has migrated, how many secrets, and what days did we migrate data?",
@@ -35,131 +147,113 @@ const STARTERS = [
   "Help",
 ];
 
+// ── Main component ────────────────────────────────────────────────────────────
 export function Assistant() {
   const [engagements, setEngagements] = useState<Engagement[]>([]);
   const persisted = loadState();
-  const [engId, setEngId] = useState<string>(persisted.engId);
+  const [engId, setEngId]   = useState<string>(persisted.engId);
   const [history, setHistory] = useState<Turn[]>(persisted.history);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [input, setInput]   = useState("");
+  const [busy, setBusy]     = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const abortRef  = useRef<AbortController | null>(null);
 
-  // Persist state whenever it changes
   useEffect(() => {
     saveState({ engId, history: history.filter(t => !t.isLoading) });
   }, [engId, history]);
 
   useEffect(() => {
-    api.listEngagements().then((e) => {
+    api.listEngagements().then(e => {
       setEngagements(e);
       if (!persisted.engId && e.length === 1) setEngId(e[0].id);
     }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [history]);
 
   const abort = useCallback(() => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
+    abortRef.current?.abort();
+    abortRef.current = null;
     setBusy(false);
-    // Mark any loading turn as cancelled
-    setHistory(h => h.map(t =>
-      t.isLoading ? { ...t, isLoading: false, answer: t.answer || "(cancelled)" } : t
-    ));
+    setHistory(h => h.map(t => t.isLoading ? { ...t, isLoading: false, answer: t.answer || "(cancelled)" } : t));
   }, []);
 
   async function ask(question: string) {
     if (!engId || !question.trim() || busy) return;
-
     const controller = new AbortController();
     abortRef.current = controller;
-
-    setHistory(h => [...h, { question, answer: "", toolUsed: null, isLoading: true }]);
+    setHistory(h => [...h, { question, answer: "", toolUsed: null, directData: null, isLoading: true }]);
     setInput("");
     setBusy(true);
 
     let toolUsed: string | null = null;
     let accumulated = "";
+    let directData: Record<string, unknown> | null = null;
 
     try {
-      const conversationHistory = history
-        .filter(t => !t.isLoading)
-        .slice(-4)
+      const convHistory = history.filter(t => !t.isLoading).slice(-2)
         .map(t => ({ question: t.question, answer: t.answer }));
 
       const res = await fetch(`/api/engagements/${engId}/assistant`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, history: conversationHistory }),
+        body: JSON.stringify({ question, history: convHistory }),
         signal: controller.signal,
       });
-
       if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText}`);
 
-      const reader = res.body.getReader();
+      const reader  = res.body.getReader();
       const decoder = new TextDecoder();
+      let   buffer  = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n");
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";   // keep incomplete last line
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const payload = line.slice(6).trim();
           if (!payload) continue;
-
           let msg: Record<string, string>;
           try { msg = JSON.parse(payload); } catch { continue; }
 
           if (msg.type === "phase") {
-            const newPhase: Phase = { label: msg.phase, detail: msg.detail, done: false };
             setHistory(h => {
               const prev = h[h.length - 1];
-              const oldPhases = prev?.phases ?? [];
-              // Mark previous phase done
-              const updatedPhases = [...oldPhases.map(p => ({ ...p, done: true })), newPhase];
-              return [...h.slice(0, -1), { ...prev, phases: updatedPhases }];
+              const old  = prev?.phases ?? [];
+              return [...h.slice(0, -1), {
+                ...prev,
+                phases: [...old.map(p => ({ ...p, done: true })),
+                         { label: msg.phase, detail: msg.detail, done: false }],
+              }];
             });
           } else if (msg.type === "tool") {
             toolUsed = msg.tool;
-            setHistory(h => [...h.slice(0, -1), {
-              ...h[h.length - 1], toolUsed, isLoading: true
-            }]);
+            setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], toolUsed }]);
+          } else if (msg.type === "direct") {
+            try { directData = JSON.parse(msg.data); } catch { /* ignore */ }
+            setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], directData, isLoading: false,
+              phases: (h[h.length-1]?.phases ?? []).map(p => ({ ...p, done: true })) }]);
           } else if (msg.type === "token") {
             accumulated += msg.text;
-            setHistory(h => [...h.slice(0, -1), {
-              question, answer: accumulated, toolUsed, isLoading: true
-            }]);
+            setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], answer: accumulated }]);
           } else if (msg.type === "done") {
-            setHistory(h => {
-              const prev = h[h.length - 1];
-              return [...h.slice(0, -1), {
-                question, answer: accumulated, toolUsed,
-                phases: (prev?.phases ?? []).map(p => ({ ...p, done: true })),
-                isLoading: false,
-              }];
-            });
+            setHistory(h => [...h.slice(0, -1), { ...h[h.length-1],
+              answer: accumulated, isLoading: false,
+              phases: (h[h.length-1]?.phases ?? []).map(p => ({ ...p, done: true })) }]);
           } else if (msg.type === "error") {
-            setHistory(h => [...h.slice(0, -1), {
-              question, answer: `Error: ${msg.message}`, toolUsed: null, isLoading: false
-            }]);
+            setHistory(h => [...h.slice(0, -1), { ...h[h.length-1],
+              answer: "Error: " + msg.message, isLoading: false }]);
           }
         }
       }
     } catch (err: unknown) {
-      if ((err as Error)?.name === "AbortError") return; // user cancelled
+      if ((err as Error)?.name === "AbortError") return;
       const msg = err instanceof Error ? err.message : "Unknown error";
-      setHistory(h => [...h.slice(0, -1), {
-        question, answer: `Error: ${msg}`, toolUsed: null, isLoading: false
-      }]);
+      setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], answer: "Error: " + msg, isLoading: false }]);
     } finally {
       abortRef.current = null;
       setBusy(false);
@@ -170,7 +264,7 @@ export function Assistant() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(input); }
   }
 
-  const selectedEng = engagements.find((e) => e.id === engId);
+  const selectedEng = engagements.find(e => e.id === engId);
 
   return (
     <div className="assistant-page">
@@ -180,28 +274,20 @@ export function Assistant() {
           <p className="muted">Read-only AI advisor · powered by local Ollama · never writes to tenants</p>
         </div>
         <div className="assistant-header-right">
-          <select
-            className="assistant-eng-select"
-            value={engId}
-            onChange={(e) => { setEngId(e.target.value); setHistory([]); }}
-          >
+          <select className="assistant-eng-select" value={engId}
+            onChange={e => { setEngId(e.target.value); setHistory([]); }}>
             <option value="">— select engagement —</option>
-            {engagements.map((e) => (
-              <option key={e.id} value={e.id}>{e.name} · {e.customer_name}</option>
-            ))}
+            {engagements.map(e => <option key={e.id} value={e.id}>{e.name} · {e.customer_name}</option>)}
           </select>
-          {history.length > 0 && (
-            <button className="btn-ghost" onClick={() => { setHistory([]); saveState({ engId, history: [] }); }}>
-              Clear
-            </button>
-          )}
+          {history.length > 0 &&
+            <button className="btn-ghost" onClick={() => { setHistory([]); saveState({ engId, history: [] }); }}>Clear</button>}
         </div>
       </div>
 
       {!engId ? (
         <div className="assistant-empty">
           <div className="assistant-empty-icon">🤖</div>
-          <p>Select an engagement above to start asking questions about your migration.</p>
+          <p>Select an engagement above to start asking questions.</p>
         </div>
       ) : (
         <>
@@ -209,11 +295,7 @@ export function Assistant() {
             <div className="assistant-starters">
               <p className="muted">Try one of these for <strong>{selectedEng?.name}</strong>:</p>
               <div className="starter-grid">
-                {STARTERS.map((s) => (
-                  <button key={s} className="starter-btn" onClick={() => ask(s)} disabled={busy}>
-                    {s}
-                  </button>
-                ))}
+                {STARTERS.map(s => <button key={s} className="starter-btn" onClick={() => ask(s)} disabled={busy}>{s}</button>)}
               </div>
             </div>
           )}
@@ -225,18 +307,18 @@ export function Assistant() {
                   <span className="bubble-label">You</span>
                   <p>{turn.question}</p>
                 </div>
-                <div className={`chat-bubble ai-bubble${turn.isLoading ? " loading" : ""}`}>
+                <div className={"chat-bubble ai-bubble" + (turn.isLoading ? " loading" : "")}>
                   <span className="bubble-label">
                     Assistant
-                    {turn.toolUsed && (
-                      <span className="tool-tag">via {turn.toolUsed.replace(/_/g, " ")}</span>
-                    )}
+                    {turn.toolUsed && <span className="tool-tag">via {turn.toolUsed.replace(/_/g, " ")}</span>}
                     {turn.isLoading && <span className="streaming-dot" />}
                   </span>
-                  {(turn.phases && turn.phases.length > 0) && (
+
+                  {/* Phase timeline */}
+                  {turn.phases && turn.phases.length > 0 && (
                     <div className="phase-timeline">
                       {turn.phases.map((ph, pi) => (
-                        <div key={pi} className={"phase-step" + (ph.done ? " done" : " active")}>
+                        <div key={pi} className={"phase-step " + (ph.done ? "done" : "active")}>
                           <span className="phase-icon">{ph.done ? "✓" : "●"}</span>
                           <span className="phase-label">{ph.detail}</span>
                           {!ph.done && <span className="streaming-dot" />}
@@ -244,15 +326,23 @@ export function Assistant() {
                       ))}
                     </div>
                   )}
-                  {turn.answer ? (
+
+                  {/* Direct structured card — instant, no LLM */}
+                  {turn.directData && <DirectCard tool={turn.toolUsed} data={turn.directData} />}
+
+                  {/* LLM streamed answer with markdown */}
+                  {turn.answer && (
                     <div className="ai-answer">
-                      {turn.answer.split("\n").map((line, j) =>
-                        line.trim() === "" ? <br key={j} /> : <p key={j}>{line}</p>
-                      )}
+                      <ul className="ai-bullets">
+                        {renderMarkdown(turn.answer)}
+                      </ul>
                     </div>
-                  ) : turn.isLoading && (!turn.phases || turn.phases.length === 0) ? (
+                  )}
+
+                  {/* Waiting state */}
+                  {turn.isLoading && !turn.answer && !turn.directData && (!turn.phases || turn.phases.length === 0) && (
                     <p className="thinking">Starting up…</p>
-                  ) : null}
+                  )}
                 </div>
               </div>
             ))}
@@ -260,28 +350,13 @@ export function Assistant() {
           </div>
 
           <div className="assistant-input-row">
-            <textarea
-              className="assistant-input"
-              rows={2}
+            <textarea className="assistant-input" rows={2}
               placeholder="Ask about this migration…  (Enter to send, Shift+Enter for newline)"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKey}
-              disabled={busy}
-            />
-            {busy ? (
-              <button className="btn-danger assistant-send" onClick={abort}>
-                ■ Stop
-              </button>
-            ) : (
-              <button
-                className="btn-primary assistant-send"
-                onClick={() => ask(input)}
-                disabled={!input.trim()}
-              >
-                Ask
-              </button>
-            )}
+              value={input} onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKey} disabled={busy} />
+            {busy
+              ? <button className="btn-danger assistant-send" onClick={abort}>■ Stop</button>
+              : <button className="btn-primary assistant-send" onClick={() => ask(input)} disabled={!input.trim()}>Ask</button>}
           </div>
         </>
       )}
