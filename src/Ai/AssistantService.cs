@@ -207,9 +207,10 @@ public sealed class AssistantService(
 
         if (history is { Count: > 0 })
         {
-            foreach (var t in history.TakeLast(2)) // trim to 2 turns for speed
+            foreach (var t in history.TakeLast(4))
             {
-                messages.Add(new(ChatRole.User,      t.Question));
+                messages.Add(new(ChatRole.User, t.Question));
+                // Direct-card turns have a synthetic summary from the frontend
                 messages.Add(new(ChatRole.Assistant, t.Answer));
             }
         }

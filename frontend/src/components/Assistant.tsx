@@ -273,8 +273,14 @@ export function Assistant() {
     let directData: Record<string, unknown> | null = null;
 
     try {
-      const convHistory = history.filter(t => !t.isLoading).slice(-2)
-        .map(t => ({ question: t.question, answer: t.answer }));
+      // For direct-card turns, synthesize a short text summary so the LLM
+      // has context on prior turns even when they rendered as structured cards.
+      const convHistory = history.filter(t => !t.isLoading).slice(-4).map(t => ({
+        question: t.question,
+        answer: t.answer || (t.directData
+          ? "[Structured data returned for: " + (t.toolUsed ?? "tool") + "]"
+          : "(no response)"),
+      }));
 
       const res = await fetch(`/api/engagements/${engId}/assistant`, {
         method: "POST",
