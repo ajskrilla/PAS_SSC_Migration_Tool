@@ -5,6 +5,7 @@ using Hangfire;
 using Hangfire.PostgreSql;
 using Npgsql;
 using PasMigration.Connectors;
+using PasMigration.Ai;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -25,6 +26,21 @@ builder.Services.AddScoped<MigrationService>();
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Tracks running migration jobs so they can be aborted from the UI.
 builder.Services.AddSingleton<JobRegistry>();
+
+// Named HttpClient for Ollama (default: http://ollama:11434, overridable via Ai__Ollama__Endpoint).
+builder.Services.AddHttpClient("ollama", (sp, c) =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var endpoint = cfg["Ai__Ollama__Endpoint"] ?? "http://ollama:11434";
+    c.BaseAddress = new Uri(endpoint);
+    c.Timeout = TimeSpan.FromSeconds(120);
+});
+
+// AI layer - provider + catalog are singletons; router + service are scoped.
+builder.Services.AddSingleton<ILlmProvider, OllamaProvider>();
+builder.Services.AddSingleton<AssistantCatalog>();
+builder.Services.AddScoped<AssistantRouter>();
+builder.Services.AddScoped<AssistantService>();
 
 // Resumable background jobs (migration orchestrator) backed by Postgres.
 builder.Services.AddHangfire(cfg => cfg
@@ -392,6 +408,22 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
               ORDER BY item_type, name LIMIT 1000",
             new { id });
         return Results.Ok(new { summary, items });
+    });
+
+
+// Assistant: read-only advisor endpoint.
+app.MapPost("/api/engagements/{id:guid}/assistant",
+    async (Guid id, AssistantRequest req, AssistantService svc, CancellationToken ct) =>
+    {
+        try
+        {
+            var reply = await svc.AskAsync(id, req.Question, req.History, ct);
+            return Results.Ok(reply);
+        }
+        catch (Exception ex)
+        {
+            return Results.Problem($"Assistant error: {ex.Message}");
+        }
     });
 
 app.Run();

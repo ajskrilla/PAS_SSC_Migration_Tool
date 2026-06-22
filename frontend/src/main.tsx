@@ -7,6 +7,7 @@ import { Connections } from "./components/Connections";
 import { Migration } from "./components/Migration";
 import { Logs } from "./components/Logs";
 import { Readiness } from "./components/Readiness";
+import { Assistant } from "./components/Assistant";
 import "./index.css";
 
 function Shell() {
@@ -44,6 +45,7 @@ function Shell() {
           <Route path="/connections" element={<Connections />} />
           <Route path="/migrate" element={<Migration />} />
           <Route path="/logs" element={<Logs />} />
+          <Route path="/assistant" element={<Assistant />} />
           <Route path="*" element={<Placeholder />} />
         </Routes>
       </main>
