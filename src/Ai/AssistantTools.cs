@@ -17,47 +17,51 @@ public sealed class AssistantTools(IDbConnection db)
 
     public async Task<object> CheckPrerequisitesAsync(Guid engagementId)
     {
-        // Has a source connection been saved and tested?
-        var conns = await db.QueryAsync(
-            @"SELECT tc.role, tc.system_type, cs.status, cs.tested_at
-              FROM tenant_connection tc
-              LEFT JOIN connection_status cs ON cs.tenant_connection_id = tc.id
-              WHERE tc.engagement_id = @id",
-            new { id = engagementId });
+        // Which tenant connections exist and what auth mode are they using?
+        var conns = (await db.QueryAsync(
+            @"SELECT role, system_type, auth_mode
+              FROM tenant_connection
+              WHERE engagement_id = @id",
+            new { id = engagementId })).Cast<IDictionary<string, object?>>().ToList();
 
-        var connList = conns.Cast<IDictionary<string, object?>>().ToList();
+        bool sourceExists = conns.Any(c => c["role"]?.ToString() == "source");
+        bool targetExists = conns.Any(c => c["role"]?.ToString() == "target");
 
-        bool sourceConnected = connList.Any(c =>
-            c["role"]?.ToString() == "source" && c["status"]?.ToString() == "ok");
-        bool targetConnected = connList.Any(c =>
-            c["role"]?.ToString() == "target" && c["status"]?.ToString() == "ok");
+        // Platform-enabled = source using platform_client_credentials auth
+        bool platformEnabled = conns.Any(c =>
+            c["role"]?.ToString() == "source" &&
+            c["auth_mode"]?.ToString() == "platform_client_credentials");
 
-        // Has a source inventory been captured?
-        var inventoryCaptured = await db.ExecuteScalarAsync<bool>(
+        // Has a source inventory been captured (proves the connection actually worked)?
+        bool inventoryCaptured = await db.ExecuteScalarAsync<bool>(
             @"SELECT EXISTS(
                 SELECT 1 FROM inventory_snapshot s
                 JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
                 WHERE s.engagement_id = @id AND tc.role = 'source')",
             new { id = engagementId });
 
-        // Was the source connection auth mode Platform (proves Unified tenant)?
-        var platformEnabled = await db.ExecuteScalarAsync<bool>(
+        bool targetInventoryCaptured = await db.ExecuteScalarAsync<bool>(
             @"SELECT EXISTS(
-                SELECT 1 FROM tenant_connection
-                WHERE engagement_id = @id AND role = 'source'
-                  AND auth_mode = 'platform_client_credentials')",
+                SELECT 1 FROM inventory_snapshot s
+                JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+                WHERE s.engagement_id = @id AND tc.role = 'target')",
             new { id = engagementId });
 
         return new
         {
-            source_connection = sourceConnected ? "ok" : "not_tested",
-            target_connection = targetConnected ? "ok" : "not_tested",
-            inventory_captured = inventoryCaptured,
-            platform_unified = platformEnabled ? "ok" : "unknown — verify on Readiness page",
-            uva_mode = "unknown — verify manually in Secret Server Admin > Configuration",
-            pas_admin_role = "unknown — verify manually: PAS service account must be System Administrator",
-            ss_admin_role = "unknown — verify manually: SS service account must be Secret Server Administrator",
-            oauth2_app = sourceConnected ? "implied_ok — source connection tested successfully" : "unverified",
+            source_connection_configured = sourceExists ? "ok" : "missing — add source connection on Pre-migration page",
+            target_connection_configured = targetExists ? "ok" : "missing — add target connection on Pre-migration page",
+            source_inventory_captured    = inventoryCaptured ? "ok" : "not yet — run inventory on Pre-migration page",
+            target_inventory_captured    = targetInventoryCaptured ? "ok" : "not yet — run inventory on Pre-migration page",
+            platform_unified             = platformEnabled
+                                             ? "ok — source is using Platform (OAuth2) auth, tenant appears unified"
+                                             : "unknown — source is not using Platform auth; verify tenant is Unified/Platform-enabled",
+            oauth2_app_in_pas            = inventoryCaptured
+                                             ? "implied ok — inventory capture succeeded, which requires a working OAuth2 app"
+                                             : "unverified — run inventory first to confirm OAuth2 app is configured",
+            uva_mode                     = "unknown — verify manually: Secret Server Admin > Configuration > Unlimited Vault Access",
+            pas_admin_role               = "unknown — verify manually: PAS service account must be in System Administrator role",
+            ss_admin_role                = "unknown — verify manually: SS service account must be in Secret Server Administrator role",
         };
     }
 
@@ -81,7 +85,6 @@ public sealed class AssistantTools(IDbConnection db)
               FROM migration_job WHERE engagement_id=@id ORDER BY started_at DESC LIMIT 10",
             new { id = engagementId });
 
-        // Overall percentage
         var totals = await db.QueryFirstOrDefaultAsync(
             @"SELECT COUNT(*) AS total,
                      COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated
@@ -119,7 +122,7 @@ public sealed class AssistantTools(IDbConnection db)
             new { id = engagementId });
 
         if (snapshot == null)
-            return new { error = "No source inventory captured yet. Run inventory first." };
+            return new { error = "No source inventory captured yet. Run inventory first from the Pre-migration page." };
 
         var d = (IDictionary<string, object?>)snapshot;
         var json = d["summary_json"] as string;
@@ -127,47 +130,49 @@ public sealed class AssistantTools(IDbConnection db)
         if (!string.IsNullOrEmpty(json))
             summary = JsonSerializer.Deserialize<Dictionary<string, int>>(json);
 
-        int managed = summary?.GetValueOrDefault("managed", 0) ?? 0;
+        int managed  = summary?.GetValueOrDefault("managed", 0)       ?? 0;
+        int accounts = summary?.GetValueOrDefault("accounts", 0)      ?? 0;
+        int text     = summary?.GetValueOrDefault("text_secrets", 0)  ?? 0;
+        int files    = summary?.GetValueOrDefault("file_secrets", 0)  ?? 0;
+        int total    = summary?.GetValueOrDefault("total", 0)         ?? 0;
 
         string recommendation;
-        if (managed == 0)
-            recommendation = "No managed accounts detected. Standard single-day migration: run in order text → file → accounts.";
+        if (managed == 0 && accounts == 0)
+            recommendation = "No accounts found. This is a secrets-only vault. Migrate text secrets first, then file secrets. Single migration day is appropriate.";
         else if (managed < 20_000)
-            recommendation = $"{managed:N0} managed accounts — under the 20 000 threshold. Schedule a single migration day once prerequisites are green. Migrate in order: text secrets → file secrets → accounts.";
+            recommendation = $"{managed:N0} managed accounts — under the 20,000 threshold. Schedule a single migration day once prerequisites are green. Recommended order: text secrets → file secrets → accounts.";
         else
-            recommendation = $"{managed:N0} managed accounts — OVER the 20 000 threshold. A dedicated account migration path is required. Ensure all stakeholders are informed, agree on a cutoff date for active rotation, and plan the unmanage/re-manage sequence carefully. Migrate text and file secrets first, then execute the account plan.";
+            recommendation = $"{managed:N0} managed accounts — OVER the 20,000 threshold. A dedicated account migration path is required. Coordinate with all stakeholders, agree on a cutoff date for active password rotation, and plan the unmanage/re-manage sequence carefully before starting. Migrate text and file secrets first, then execute the account plan.";
 
         return new
         {
             captured_at = d["captured_at"],
-            counts = summary,
-            managed_account_recommendation = recommendation
+            vault_size = new { total, accounts, managed_accounts = managed, text_secrets = text, file_secrets = files },
+            migration_recommendation = recommendation
         };
     }
 
     // ── Tool 4: reconciliation_status ────────────────────────────────────────────────
-    // Source-vs-target diff — what's matched, source-only, target-only, conflicted.
 
     public async Task<object> ReconciliationStatusAsync(Guid engagementId)
     {
-        var rows = await db.QueryAsync(
-            @"SELECT item_type, match_status, COUNT(*) AS n
-              FROM reconciliation_result WHERE engagement_id = @id
-              GROUP BY item_type, match_status ORDER BY item_type, match_status",
-            new { id = engagementId });
-
-        var hasData = await db.ExecuteScalarAsync<bool>(
+        bool hasData = await db.ExecuteScalarAsync<bool>(
             "SELECT EXISTS(SELECT 1 FROM reconciliation_result WHERE engagement_id=@id)",
             new { id = engagementId });
 
         if (!hasData)
             return new { error = "No reconciliation data yet. Run a reconcile pass from the Pre-migration page first." };
 
+        var rows = await db.QueryAsync(
+            @"SELECT item_type, match_status, COUNT(*) AS n
+              FROM reconciliation_result WHERE engagement_id = @id
+              GROUP BY item_type, match_status ORDER BY item_type, match_status",
+            new { id = engagementId });
+
         return new { reconciliation = rows };
     }
 
     // ── Tool 5: recent_activity ──────────────────────────────────────────────────────
-    // Last N event log entries — what has been happening in this engagement.
 
     public async Task<object> RecentActivityAsync(Guid engagementId, int limit = 20)
     {
