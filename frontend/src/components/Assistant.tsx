@@ -316,7 +316,11 @@ export function Assistant() {
             toolUsed = msg.tool;
             setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], toolUsed }]);
           } else if (msg.type === "direct") {
-            try { directData = JSON.parse(msg.data); } catch { /* ignore */ }
+            // msg.data is already a parsed object (embedded JSON in the SSE payload)
+            const raw = msg.data as unknown;
+            directData = (raw && typeof raw === "object")
+              ? raw as Record<string, unknown>
+              : (() => { try { return JSON.parse(String(raw)); } catch { return null; } })();
             setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], directData, isLoading: false,
               phases: (h[h.length-1]?.phases ?? []).map(p => ({ ...p, done: true })) }]);
           } else if (msg.type === "token") {
