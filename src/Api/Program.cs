@@ -31,7 +31,10 @@ builder.Services.AddSingleton<JobRegistry>();
 builder.Services.AddHttpClient("ollama", (sp, c) =>
 {
     var cfg = sp.GetRequiredService<IConfiguration>();
-    var endpoint = cfg["Ai__Ollama__Endpoint"] ?? "http://ollama:11434";
+    var endpoint = cfg["Ai__Ollama__Endpoint"]
+                ?? cfg["OLLAMA_ENDPOINT"]
+                ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")
+                ?? "http://ollama:11434";
     c.BaseAddress = new Uri(endpoint);
     c.Timeout = TimeSpan.FromSeconds(120);
 });
@@ -433,9 +436,9 @@ app.MapPost("/api/engagements/{id:guid}/assistant",
 // Diagnostic: test Ollama connectivity and config from inside the API container.
 app.MapGet("/api/diag/ollama", async (ILlmProvider llm, IConfiguration cfg) =>
 {
-    var endpoint = cfg["Ai__Ollama__Endpoint"] ?? "(not set)";
-    var chatModel = cfg["Ai__Ollama__ChatModel"] ?? "(not set)";
-    var embedModel = cfg["Ai__Ollama__EmbedModel"] ?? "(not set)";
+    var endpoint  = cfg["Ai__Ollama__Endpoint"]  ?? cfg["OLLAMA_ENDPOINT"]  ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")  ?? "(not set)";
+    var chatModel = cfg["Ai__Ollama__ChatModel"]  ?? cfg["OLLAMA_CHAT_MODEL"] ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL") ?? "(not set)";
+    var embedModel= cfg["Ai__Ollama__EmbedModel"] ?? cfg["OLLAMA_EMBED_MODEL"]?? Environment.GetEnvironmentVariable("OLLAMA_EMBED_MODEL")?? "(not set)";
     try
     {
         var embedding = await llm.EmbedAsync("ping", CancellationToken.None);

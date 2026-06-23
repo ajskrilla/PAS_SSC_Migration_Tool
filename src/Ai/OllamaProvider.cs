@@ -24,8 +24,23 @@ public sealed class OllamaProvider : ILlmProvider
     public OllamaProvider(IHttpClientFactory factory, IConfiguration cfg, ILogger<OllamaProvider> log)
     {
         _factory    = factory;
-        _chatModel  = cfg["Ai__Ollama__ChatModel"]  ?? "llama3.1:8b";
-        _embedModel = cfg["Ai__Ollama__EmbedModel"] ?? "nomic-embed-text";
+        // Try ASP.NET config key first, then direct env var, then default.
+        // The compose file injects these as Ai__Ollama__* but .env wiring
+        // can fail if env_file isn't set — fall back to direct env var names.
+        _chatModel  = cfg["Ai__Ollama__ChatModel"]
+                   ?? cfg["OLLAMA_CHAT_MODEL"]
+                   ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL")
+                   ?? "qwen2.5:3b";   // safe default — llama3.1:8b may not be pulled
+        _embedModel = cfg["Ai__Ollama__EmbedModel"]
+                   ?? cfg["OLLAMA_EMBED_MODEL"]
+                   ?? Environment.GetEnvironmentVariable("OLLAMA_EMBED_MODEL")
+                   ?? "nomic-embed-text";
+        var endpoint = cfg["Ai__Ollama__Endpoint"]
+                    ?? cfg["OLLAMA_ENDPOINT"]
+                    ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")
+                    ?? "http://ollama:11434";
+        log.LogInformation("OllamaProvider init: endpoint={Endpoint} chat={Chat} embed={Embed}",
+            endpoint, _chatModel, _embedModel);
         _log        = log;
     }
 
