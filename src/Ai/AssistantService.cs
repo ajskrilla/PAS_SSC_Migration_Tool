@@ -208,6 +208,9 @@ public sealed class AssistantService(
                 q.Contains("what can you") || q.Contains("think about") ||
                 q.Contains("opinion") || q.Contains("what should i") ||
                 q.Contains("advice") || q.Contains("thoughts") ||
+                q.Contains("feel about") || q.Contains("how do you") ||
+                q.Contains("how do u") || q.Contains("good idea") ||
+                q.Contains("bad idea") || q.Contains("worried") ||
                 (q.Length < 20 && q.Contains("?")));
 
             if (isHelp)

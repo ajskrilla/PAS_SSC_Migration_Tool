@@ -429,6 +429,34 @@ app.MapPost("/api/engagements/{id:guid}/assistant",
         }
     });
 
+
+// Diagnostic: test Ollama connectivity and config from inside the API container.
+app.MapGet("/api/diag/ollama", async (ILlmProvider llm, IConfiguration cfg) =>
+{
+    var endpoint = cfg["Ai__Ollama__Endpoint"] ?? "(not set)";
+    var chatModel = cfg["Ai__Ollama__ChatModel"] ?? "(not set)";
+    var embedModel = cfg["Ai__Ollama__EmbedModel"] ?? "(not set)";
+    try
+    {
+        var embedding = await llm.EmbedAsync("ping", CancellationToken.None);
+        var embedOk = embedding.Length > 0;
+        return Results.Ok(new
+        {
+            endpoint, chatModel, embedModel,
+            embed_test = embedOk ? "ok" : "failed",
+            embed_dims = embedding.Length,
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new
+        {
+            endpoint, chatModel, embedModel,
+            embed_test = "error: " + ex.Message,
+        });
+    }
+});
+
 app.Run();
 
 public record CreateEngagement(string Name, string CustomerName);
