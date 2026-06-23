@@ -201,23 +201,38 @@ public sealed class AssistantService(
         if (toolName is null)
         {
             var q = question.ToLowerInvariant().Trim();
-            bool isHelp = q.Length < 30 && (
+            bool isHelp = (
                 q.Contains("help") || q.Contains("what can") || q.Contains("hi") ||
-                q.Contains("hello") || q.Contains("test") || q.Contains("?") ||
-                q.Contains("capabilit") || q.Contains("what do you"));
+                q.Contains("hello") || q.Contains("test") || q.Contains("capabilit") ||
+                q.Contains("what do you") || q.Contains("what are you") ||
+                q.Contains("what can you") || q.Contains("think about") ||
+                q.Contains("opinion") || q.Contains("what should i") ||
+                q.Contains("advice") || q.Contains("thoughts") ||
+                (q.Length < 20 && q.Contains("?")));
 
             if (isHelp)
             {
-                yield return Token(
-                    "Here is what I can help with:\n\n" +
-                    "* **Check prerequisites** - verify connections, inventory, platform auth, OAuth2\n" +
-                    "* **Migration stats** - percentage migrated, counts by type, job dates\n" +
-                    "* **Environment summary** - vault size, managed accounts, migration approach\n" +
-                    "* **Reconciliation status** - matched vs unmatched items source vs target\n" +
-                    "* **Risk scan** - large files, duplicates, managed account risks\n" +
-                    "* **Explain failures** - what failed in the last run and how to fix it\n" +
-                    "* **Recent activity** - event log entries\n\n" +
-                    "Just ask naturally - for example: 'what failed?', 'am I ready to migrate?', 'show my progress'");
+                bool isOpinion = q.Contains("think about") || q.Contains("opinion") ||
+                    q.Contains("thoughts") || q.Contains("what should");
+
+                string reply = isOpinion
+                    ? "I am a read-only data advisor - I can report on your migration data but I do not form opinions or make judgment calls. " +
+                      "Try asking me something specific like:\n\n" +
+                      "* 'What percentage of my vault has migrated?'\n" +
+                      "* 'Am I ready to migrate?' (checks prerequisites)\n" +
+                      "* 'Scan my environment for risks'\n" +
+                      "* 'What failed in my last run?'"
+                    : "Here is what I can help with:\n\n" +
+                      "* **Check prerequisites** - verify connections, inventory, platform auth, OAuth2\n" +
+                      "* **Migration stats** - percentage migrated, counts by type, job dates\n" +
+                      "* **Environment summary** - vault size, managed accounts, migration approach\n" +
+                      "* **Reconciliation status** - matched vs unmatched items source vs target\n" +
+                      "* **Risk scan** - large files, duplicates, managed account risks\n" +
+                      "* **Explain failures** - what failed in the last run and how to fix it\n" +
+                      "* **Recent activity** - event log entries\n\n" +
+                      "Just ask naturally - for example: 'what failed?', 'am I ready to migrate?', 'show my progress'";
+
+                yield return Token(reply);
                 yield return Done();
                 yield break;
             }

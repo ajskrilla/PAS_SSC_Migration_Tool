@@ -35,13 +35,13 @@ function renderMarkdown(text: string) {
         : p
     );
 
-    // Bullet
-    if (trimmed.startsWith("* ") || trimmed.startsWith("- ") || trimmed.startsWith("+ "))
-      return <li key={i}>{parts.slice(1)}{/* drop bullet char */}
-               {trimmed.slice(2).split(/(\*\*[^*]+\*\*)/g).map((p, j) =>
-                 p.startsWith("**") && p.endsWith("**") ? <strong key={j}>{p.slice(2,-2)}</strong> : p
-               )}
-             </li>;
+    // Bullet — render once using the already-processed parts, skipping the "* " prefix
+    if (trimmed.startsWith("* ") || trimmed.startsWith("- ") || trimmed.startsWith("+ ")) {
+      const bulletParts = trimmed.slice(2).split(/(\*\*[^*]+\*\*)/g).map((p, j) =>
+        p.startsWith("**") && p.endsWith("**") ? <strong key={j}>{p.slice(2,-2)}</strong> : p
+      );
+      return <li key={i}>{bulletParts}</li>;
+    }
 
     // Header
     if (trimmed.startsWith("## ")) return <h4 key={i}>{trimmed.slice(3)}</h4>;
