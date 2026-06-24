@@ -421,14 +421,41 @@ app.MapPost("/api/engagements/{id:guid}/assistant",
     {
         response.Headers["Content-Type"]  = "text/event-stream";
         response.Headers["Cache-Control"] = "no-cache";
-        response.Headers["X-Accel-Buffering"] = "no"; // disable nginx buffering
+        response.Headers["X-Accel-Buffering"] = "no";
         await response.Body.FlushAsync(ct);
 
-        await foreach (var chunk in svc.AskStreamAsync(id, req.Question, req.History, ct))
+        // SSE ping bytes — ": ping\n\n" keeps browser + nginx alive during slow inference.
+        // Written as raw bytes to avoid string escape issues.
+        var pingBytes = new byte[] { 58, 32, 112, 105, 110, 103, 10, 10 }; // ": ping\n\n"
+
+");
+
+        using var pingTimer = new System.Threading.PeriodicTimer(TimeSpan.FromSeconds(15));
+        var pingTask = Task.Run(async () =>
         {
-            if (ct.IsCancellationRequested) break;
-            await response.WriteAsync(chunk, ct);
-            await response.Body.FlushAsync(ct);
+            while (await pingTimer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                try
+                {
+                    await response.Body.WriteAsync(pingBytes, ct);
+                    await response.Body.FlushAsync(ct);
+                }
+                catch { break; }
+            }
+        }, ct);
+
+        try
+        {
+            await foreach (var chunk in svc.AskStreamAsync(id, req.Question, req.History, ct))
+            {
+                if (ct.IsCancellationRequested) break;
+                await response.WriteAsync(chunk, ct);
+                await response.Body.FlushAsync(ct);
+            }
+        }
+        finally
+        {
+            pingTimer.Dispose();
         }
     });
 
