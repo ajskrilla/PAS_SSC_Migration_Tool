@@ -135,8 +135,21 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
                         result.Total++;
                         continue;
                     }
+                    else if (si.ItemType == "folder")
+                    {
+                        // Folders are created on demand via EnsureFolderPath when a secret needs them.
+                        // Mark the folder item as succeeded here so the status table is accurate.
+                        // The actual SS folder ID is in folderCache if it was created; look it up.
+                        var folderPath = si.Name ?? si.FolderPath ?? "";
+                        if (folderCache.TryGetValue(folderPath, out var folderId))
+                            await SetTargetId(engagementId, si, folderId.ToString());
+                        await SetItemStatus(engagementId, si, "succeeded", null);
+                        result.Succeeded++;
+                        result.Total++;
+                        continue;
+                    }
                     else
-                        continue; // folders are created on demand
+                        continue; // unknown type — skip
 
                     result.Succeeded++;
                     await SetItemStatus(engagementId, si, "succeeded", null);
@@ -531,7 +544,14 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
                 (job_id, engagement_id, item_type, source_native_id, source_name, source_folder_path, status)
               VALUES (@J, @E, @T, @N, @Name, @Path, 'in_progress')
               ON CONFLICT (engagement_id, item_type, source_native_id)
-              DO UPDATE SET job_id=@J, status='in_progress', attempts=migration_item.attempts+1",
+              -- Only reset to in_progress if not already succeeded/migrated.
+              -- This prevents a re-run from wiping previously successful item statuses.
+              DO UPDATE SET job_id=@J,
+                status = CASE
+                  WHEN migration_item.status IN ('succeeded','migrated') THEN migration_item.status
+                  ELSE 'in_progress'
+                END,
+                attempts=migration_item.attempts+1",
             new { J = jobId, E = eng, T = si.ItemType, N = si.SourceNativeId, si.Name, Path = si.FolderPath });
 
     private async Task SetItemStatus(Guid eng, SourceItem si, string status, string? err) =>
