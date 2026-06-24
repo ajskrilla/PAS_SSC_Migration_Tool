@@ -428,7 +428,6 @@ app.MapPost("/api/engagements/{id:guid}/assistant",
         // Written as raw bytes to avoid string escape issues.
         var pingBytes = new byte[] { 58, 32, 112, 105, 110, 103, 10, 10 }; // ": ping\n\n"
 
-");
 
         using var pingTimer = new System.Threading.PeriodicTimer(TimeSpan.FromSeconds(15));
         var pingTask = Task.Run(async () =>
