@@ -73,9 +73,9 @@ public sealed class AssistantTools(IDbConnection db)
         var summary = await db.QueryAsync(
             @"SELECT item_type,
                      COUNT(*) AS total,
-                     COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated,
+                     COUNT(*) FILTER (WHERE status IN ('migrated','succeeded') OR target_native_id IS NOT NULL) AS migrated,
                      COUNT(*) FILTER (WHERE status='failed') AS failed,
-                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','failed') AND target_native_id IS NULL) AS pending
+                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','succeeded','failed') AND target_native_id IS NULL) AS pending
               FROM migration_item WHERE engagement_id=@id
               GROUP BY item_type ORDER BY item_type",
             new { id = engagementId });
@@ -87,7 +87,7 @@ public sealed class AssistantTools(IDbConnection db)
 
         var totals = await db.QueryFirstOrDefaultAsync(
             @"SELECT COUNT(*) AS total,
-                     COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated
+                     COUNT(*) FILTER (WHERE status IN ('migrated','succeeded') OR target_native_id IS NOT NULL) AS migrated
               FROM migration_item WHERE engagement_id=@id",
             new { id = engagementId });
 

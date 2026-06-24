@@ -303,7 +303,7 @@ app.MapGet("/api/engagements/{id:guid}/metrics",
 
         var progress = (await db.QueryAsync(
             $@"SELECT q.item_type AS type, COUNT(*) AS total,
-                      COUNT(mi.target_native_id) AS migrated
+                      COUNT(CASE WHEN mi.status IN ('migrated','succeeded') OR mi.target_native_id IS NOT NULL THEN 1 END) AS migrated
                FROM ({latestSource}) q
                LEFT JOIN migration_item mi
                  ON mi.engagement_id=@id AND mi.item_type=q.item_type
@@ -400,9 +400,9 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
         var summary = await db.QueryAsync(
             @"SELECT item_type,
                      COUNT(*) AS total,
-                     COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated,
+                     COUNT(*) FILTER (WHERE status IN ('migrated','succeeded') OR target_native_id IS NOT NULL) AS migrated,
                      COUNT(*) FILTER (WHERE status='failed') AS failed,
-                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','failed') AND target_native_id IS NULL) AS pending
+                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','succeeded','failed') AND target_native_id IS NULL) AS pending
               FROM migration_item WHERE engagement_id=@id
               GROUP BY item_type ORDER BY item_type",
             new { id });
