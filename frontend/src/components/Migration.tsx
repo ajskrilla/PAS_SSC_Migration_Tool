@@ -25,26 +25,53 @@ const blankConn = (): MigrateConnection => ({
   ssClientId: "", ssClientSecret: "",
 });
 
+// Persist non-sensitive migration state across navigation.
+// Credentials are intentionally NOT persisted (security).
+const MIG_KEY = "migration_state";
+function loadMigState() {
+  try {
+    const r = sessionStorage.getItem(MIG_KEY);
+    return r ? JSON.parse(r) : {};
+  } catch { return {}; }
+}
+function saveMigState(patch: Record<string, unknown>) {
+  try {
+    const cur = loadMigState();
+    sessionStorage.setItem(MIG_KEY, JSON.stringify({ ...cur, ...patch }));
+  } catch { /* quota */ }
+}
+
 export function Migration() {
+  const _saved = loadMigState();
   const [engagements, setEngagements] = useState<Engagement[]>([]);
-  const [engagementId, setEngagementId] = useState("");
-  const [jobType, setJobType] = useState<JobType>("text_secret");
+  const [engagementId, setEngagementId] = useState<string>(_saved.engagementId ?? "");
+  const [jobType, setJobType] = useState<JobType>(_saved.jobType ?? "text_secret");
   const [items, setItems] = useState<SourceItemRow[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [conn, setConn] = useState<MigrateConnection>(blankConn());
-  const [staging, setStaging] = useState("");
-  const [dryRun, setDryRun] = useState(true);
+  const [staging, setStaging] = useState<string>(_saved.staging ?? "");
+  const [dryRun, setDryRun] = useState<boolean>(_saved.dryRun ?? true);
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<MigrationJobResult | null>(null);
-  const [report, setReport] = useState<MigrationReport | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [result, setResult] = useState<MigrationJobResult | null>(_saved.result ?? null);
+  const [report, setReport] = useState<MigrationReport | null>(_saved.report ?? null);
+  const [msg, setMsg] = useState<string | null>(_saved.msg ?? null);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<MigrationStatus | null>(null);
+  const [status, setStatus] = useState<MigrationStatus | null>(_saved.status ?? null);
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [textTemplateId, setTextTemplateId] = useState<number | "">("");
   const [fileTemplateId, setFileTemplateId] = useState<number | "">("");
   const [tplMsg, setTplMsg] = useState<string | null>(null);
+
+  // Persist non-sensitive state whenever it changes
+  useEffect(() => { saveMigState({ engagementId }); }, [engagementId]);
+  useEffect(() => { saveMigState({ jobType }); }, [jobType]);
+  useEffect(() => { saveMigState({ staging }); }, [staging]);
+  useEffect(() => { saveMigState({ dryRun }); }, [dryRun]);
+  useEffect(() => { saveMigState({ result }); }, [result]);
+  useEffect(() => { saveMigState({ report }); }, [report]);
+  useEffect(() => { saveMigState({ status }); }, [status]);
+  useEffect(() => { saveMigState({ msg }); }, [msg]);
 
   // Pick a sensible default template by name (user can override).
   const pickDefault = (opts: TemplateOption[], wanted: RegExp, exclude?: RegExp) => {
@@ -112,7 +139,13 @@ export function Migration() {
   useEffect(() => {
     api.listEngagements().then((rows) => {
       setEngagements(rows);
-      if (rows.length && !engagementId) setEngagementId(rows[0].id);
+      const savedId = _saved.engagementId;
+      if (rows.length && !savedId) setEngagementId(rows[0].id);
+      // If we restored a saved engagement, refresh status + report from server
+      if (savedId && rows.some((r: Engagement) => r.id === savedId)) {
+        api.migrationStatus(savedId).then(setStatus).catch(() => {});
+        api.migrationReport(savedId).then(setReport).catch(() => {});
+      }
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
