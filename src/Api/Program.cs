@@ -310,17 +310,59 @@ app.MapPost("/api/engagements/{id:guid}/migrate",
         // Auto-load persisted credentials if vault is empty (e.g. after restart).
         if (!vault.Has(id, "source") || !vault.Has(id, "target"))
             await enc.LoadIntoVaultAsync(db, id, vault);
+
+        // Merge vault credentials into input — frontend sends metadata only (no secrets).
+        var src = vault.Get(id, "source");
+        var tgt = vault.Get(id, "target");
+        if (src is not null || tgt is not null)
+        {
+            input = input with
+            {
+                PasBaseUrl      = src?.BaseUrl ?? src?.PlatformBaseUrl ?? input.PasBaseUrl,
+                PasAppId        = src?.AppId   ?? input.PasAppId,
+                PasClientId     = src?.ClientId.Length > 0 ? src.ClientId : input.PasClientId,
+                PasClientSecret = src?.ClientSecret.Length > 0 ? src.ClientSecret : input.PasClientSecret,
+                PasScope        = src?.Scope   ?? input.PasScope,
+                SsBaseUrl           = tgt?.BaseUrl ?? input.SsBaseUrl,
+                SsPlatformBaseUrl   = tgt?.PlatformBaseUrl ?? input.SsPlatformBaseUrl,
+                SsSecretServerBaseUrl = tgt?.SecretServerBaseUrl ?? input.SsSecretServerBaseUrl,
+                SsClientId      = tgt?.ClientId.Length > 0 ? tgt.ClientId : input.SsClientId,
+                SsClientSecret  = tgt?.ClientSecret.Length > 0 ? tgt.ClientSecret : input.SsClientSecret,
+            };
+        }
+
         try { return Results.Ok(await svc.RunAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     });
 
 // Revert: delete tool-created target items (lab testing). Requires explicit confirm=true.
 app.MapPost("/api/engagements/{id:guid}/revert",
-    async (Guid id, RevertRequest req, MigrationService svc, CancellationToken ct) =>
+    async (Guid id, RevertRequest req, MigrationService svc,
+           CredentialVault vault, CredentialEncryptionService enc, IDbConnection db,
+           CancellationToken ct) =>
     {
         if (!req.Confirm)
             return Results.BadRequest(new { message = "Revert requires confirm=true. This deletes migrated target data." });
-        try { return Results.Ok(await svc.RevertAsync(id, req.Connection, ct)); }
+        // Auto-load and merge vault credentials for revert too.
+        if (!vault.Has(id, "source") || !vault.Has(id, "target"))
+            await enc.LoadIntoVaultAsync(db, id, vault);
+        var src = vault.Get(id, "source");
+        var tgt = vault.Get(id, "target");
+        var conn = req.Connection;
+        if (src is not null || tgt is not null)
+        {
+            conn = conn with
+            {
+                PasBaseUrl      = src?.BaseUrl ?? src?.PlatformBaseUrl ?? conn.PasBaseUrl,
+                PasClientId     = src?.ClientId.Length > 0 ? src.ClientId : conn.PasClientId,
+                PasClientSecret = src?.ClientSecret.Length > 0 ? src.ClientSecret : conn.PasClientSecret,
+                SsPlatformBaseUrl   = tgt?.PlatformBaseUrl ?? conn.SsPlatformBaseUrl,
+                SsSecretServerBaseUrl = tgt?.SecretServerBaseUrl ?? conn.SsSecretServerBaseUrl,
+                SsClientId      = tgt?.ClientId.Length > 0 ? tgt.ClientId : conn.SsClientId,
+                SsClientSecret  = tgt?.ClientSecret.Length > 0 ? tgt.ClientSecret : conn.SsClientSecret,
+            };
+        }
+        try { return Results.Ok(await svc.RevertAsync(id, conn, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     });
 

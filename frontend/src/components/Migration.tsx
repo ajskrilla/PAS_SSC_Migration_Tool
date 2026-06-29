@@ -45,6 +45,7 @@ export function Migration() {
   const [textTemplateId, setTextTemplateId] = useState<number | "">("");
   const [fileTemplateId, setFileTemplateId] = useState<number | "">("");
   const [tplMsg, setTplMsg] = useState<string | null>(null);
+  const [vaultReady, setVaultReady] = useState<{ source: boolean; target: boolean }>({ source: false, target: false });
   const [hideMigrated, setHideMigrated] = useState(false);
 
   // Pick a sensible default template by name (user can override).
@@ -190,7 +191,7 @@ export function Migration() {
     }
   };
 
-  const credsReady = conn.pasClientId && conn.pasClientSecret && conn.ssClientId && conn.ssClientSecret;
+  const credsReady = vaultReady.source && vaultReady.target;
 
   const exportReportCsv = () => {
     if (!report) return;
@@ -282,18 +283,20 @@ export function Migration() {
       </div>
 
       {/* Credentials — loaded automatically from Pre-migration page */}
-      <CredentialStatusBar engagementId={engagementId} onLoaded={(c) => {
-        if (c.source) {
-          cred("pasBaseUrl",       c.source.baseUrl ?? c.source.platformBaseUrl ?? "");
-          cred("pasClientId",      c.source.clientId);
-          cred("pasAppId",         c.source.appId ?? "");
-        }
-        if (c.target) {
-          cred("ssPlatformBaseUrl",    c.target.platformBaseUrl ?? "");
-          cred("ssSecretServerBaseUrl",c.target.secretServerBaseUrl ?? "");
-          cred("ssClientId",           c.target.clientId);
-        }
-      }} />
+      <CredentialStatusBar engagementId={engagementId}
+        onStatusChange={(s) => setVaultReady(s)}
+        onLoaded={(c) => {
+          if (c.source) {
+            cred("pasBaseUrl",  c.source.baseUrl ?? c.source.platformBaseUrl ?? "");
+            cred("pasClientId", c.source.clientId);
+            cred("pasAppId",    c.source.appId ?? "");
+          }
+          if (c.target) {
+            cred("ssPlatformBaseUrl",     c.target.platformBaseUrl ?? "");
+            cred("ssSecretServerBaseUrl", c.target.secretServerBaseUrl ?? "");
+            cred("ssClientId",            c.target.clientId);
+          }
+        }} />
 
       {/* Template picker (text + file secrets) */}
       {(jobType === "text_secret" || jobType === "file_secret" || jobType === "full") && (
@@ -414,7 +417,7 @@ export function Migration() {
             </>
           )}
         </div>
-        {!credsReady && <p className="muted note">Enter source and target credentials to enable run.</p>}
+        {!credsReady && <p className="muted note warn-text">⚠ Credentials not loaded — go to Pre-migration page to test your connections first.</p>}
         {msg && <div className={`result ${msg.includes("failed") ? "bad" : "ok"}`}>{msg}</div>}
         {result && (
           <div className={`result ${result.error ? "bad" : "ok"}`}>
@@ -504,9 +507,11 @@ export function Migration() {
 function CredentialStatusBar({
   engagementId,
   onLoaded,
+  onStatusChange,
 }: {
   engagementId: string;
   onLoaded: (info: Awaited<ReturnType<typeof api.credentialInfo>>) => void;
+  onStatusChange: (s: { source: boolean; target: boolean }) => void;
 }) {
   const [status, setStatus] = useState<{ source: boolean; target: boolean } | null>(null);
   const [info, setInfo]     = useState<Awaited<ReturnType<typeof api.credentialInfo>> | null>(null);
@@ -515,6 +520,7 @@ function CredentialStatusBar({
     if (!engagementId) return;
     api.credentialStatus(engagementId).then((s) => {
       setStatus(s);
+      onStatusChange(s);
       if (s.source || s.target) {
         api.credentialInfo(engagementId).then((i) => {
           setInfo(i);
@@ -543,14 +549,22 @@ function CredentialStatusBar({
             <div className="cred-pills">
               <span className="cred-pill ok">Source ✓</span>
               <span className="cred-pill ok">Target ✓</span>
-              <span className="cred-pill muted">
-                {info.source?.baseUrl ?? info.source?.platformBaseUrl ?? ""}
-              </span>
+              {info.source?.baseUrl && (
+                <span className="cred-pill muted" title="PAS source">
+                  {info.source.baseUrl}
+                </span>
+              )}
+              {info.target?.secretServerBaseUrl && (
+                <span className="cred-pill muted" title="Secret Server target">
+                  {info.target.secretServerBaseUrl}
+                </span>
+              )}
             </div>
           )}
         </div>
         {noneReady && (
-          <a href="/inventory" className="btn-primary" style={{ fontSize: ".82rem", padding: ".4rem .8rem", textDecoration: "none" }}>
+          <a href="/inventory" className="btn-primary"
+            style={{ fontSize: ".82rem", padding: ".4rem .8rem", textDecoration: "none" }}>
             Go to Pre-migration →
           </a>
         )}
