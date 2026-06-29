@@ -281,27 +281,19 @@ export function Migration() {
         </p>
       </div>
 
-      {/* Credentials */}
-      <div className="panel" style={{ marginBottom: 16 }}>
-        <div className="cred-label">Credentials · session only</div>
-        <div className="conn-grid" style={{ marginTop: 10 }}>
-          <div>
-            <div className="phase-no">SOURCE · PAS</div>
-            <Text label="Tenant base URL" v={conn.pasBaseUrl!} on={(x) => cred("pasBaseUrl", x)} />
-            <Text label="OAuth2 App ID" v={conn.pasAppId!} on={(x) => cred("pasAppId", x)} />
-            <Text label="Client ID" v={conn.pasClientId} on={(x) => cred("pasClientId", x)} />
-            <Text label="Client secret" type="password" v={conn.pasClientSecret} on={(x) => cred("pasClientSecret", x)} />
-            <Text label="Scope (optional)" v={conn.pasScope!} on={(x) => cred("pasScope", x)} />
-          </div>
-          <div>
-            <div className="phase-no">TARGET · SECRET SERVER</div>
-            <Text label="Platform base URL" v={conn.ssPlatformBaseUrl!} on={(x) => cred("ssPlatformBaseUrl", x)} />
-            <Text label="Secret Server base URL" v={conn.ssSecretServerBaseUrl!} on={(x) => cred("ssSecretServerBaseUrl", x)} />
-            <Text label="Client ID" v={conn.ssClientId} on={(x) => cred("ssClientId", x)} />
-            <Text label="Client secret" type="password" v={conn.ssClientSecret} on={(x) => cred("ssClientSecret", x)} />
-          </div>
-        </div>
-      </div>
+      {/* Credentials — loaded automatically from Pre-migration page */}
+      <CredentialStatusBar engagementId={engagementId} onLoaded={(c) => {
+        if (c.source) {
+          cred("pasBaseUrl",       c.source.baseUrl ?? c.source.platformBaseUrl ?? "");
+          cred("pasClientId",      c.source.clientId);
+          cred("pasAppId",         c.source.appId ?? "");
+        }
+        if (c.target) {
+          cred("ssPlatformBaseUrl",    c.target.platformBaseUrl ?? "");
+          cred("ssSecretServerBaseUrl",c.target.secretServerBaseUrl ?? "");
+          cred("ssClientId",           c.target.clientId);
+        }
+      }} />
 
       {/* Template picker (text + file secrets) */}
       {(jobType === "text_secret" || jobType === "file_secret" || jobType === "full") && (
@@ -506,13 +498,63 @@ export function Migration() {
   );
 }
 
-function Text({ label, v, on, type = "text" }: {
-  label: string; v: string; on: (x: string) => void; type?: string;
+
+// ── Credential status bar (replaces manual entry on Migration page) ───────────────
+
+function CredentialStatusBar({
+  engagementId,
+  onLoaded,
+}: {
+  engagementId: string;
+  onLoaded: (info: Awaited<ReturnType<typeof api.credentialInfo>>) => void;
 }) {
+  const [status, setStatus] = useState<{ source: boolean; target: boolean } | null>(null);
+  const [info, setInfo]     = useState<Awaited<ReturnType<typeof api.credentialInfo>> | null>(null);
+
+  useEffect(() => {
+    if (!engagementId) return;
+    api.credentialStatus(engagementId).then((s) => {
+      setStatus(s);
+      if (s.source || s.target) {
+        api.credentialInfo(engagementId).then((i) => {
+          setInfo(i);
+          onLoaded(i);
+        });
+      }
+    }).catch(() => {});
+  }, [engagementId]);
+
+  if (!status) return null;
+
+  const bothReady = status.source && status.target;
+  const noneReady = !status.source && !status.target;
+
   return (
-    <label className="field" style={{ marginBottom: 8 }}>
-      <span>{label}</span>
-      <input type={type} value={v} onChange={(e) => on(e.target.value)} autoComplete="off" spellCheck={false} />
-    </label>
+    <div className={"panel cred-status-bar " + (bothReady ? "cred-ok" : "cred-warn")}
+      style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <span style={{ fontWeight: 600 }}>
+            {bothReady ? "🔒 Credentials loaded from Pre-migration" :
+             noneReady ? "⚠ No credentials — set them on the Pre-migration page first" :
+             "⚠ Partial credentials — missing " + (!status.source ? "source" : "target")}
+          </span>
+          {bothReady && info && (
+            <div className="cred-pills">
+              <span className="cred-pill ok">Source ✓</span>
+              <span className="cred-pill ok">Target ✓</span>
+              <span className="cred-pill muted">
+                {info.source?.baseUrl ?? info.source?.platformBaseUrl ?? ""}
+              </span>
+            </div>
+          )}
+        </div>
+        {noneReady && (
+          <a href="/inventory" className="btn-primary" style={{ fontSize: ".82rem", padding: ".4rem .8rem", textDecoration: "none" }}>
+            Go to Pre-migration →
+          </a>
+        )}
+      </div>
+    </div>
   );
 }

@@ -37,6 +37,12 @@ export function Connections() {
   const [engagements, setEngagements] = useState<Engagement[]>([]);
   const [engagementId, setEngagementId] = useState<string>("");
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [credInfo, setCredInfo] = useState<Awaited<ReturnType<typeof api.credentialInfo>> | null>(null);
+
+  useEffect(() => {
+    if (engagementId)
+      api.credentialInfo(engagementId).then(setCredInfo).catch(() => {});
+  }, [engagementId]);
 
   useEffect(() => {
     api.listEngagements()
@@ -68,10 +74,41 @@ export function Connections() {
           )}
         </label>
         <p className="muted note">
-          Credentials are used only to test and run the migration. They’re held in memory for
-          the request and never written to the database or logs.
+          Test your connections below. Credentials are encrypted and persisted —
+          no need to re-enter after a restart.
         </p>
       </div>
+
+      {engagementId && credInfo && (credInfo.source || credInfo.target) && (
+        <div className="cred-status-banner">
+          <div className="cred-status-header">
+            <span className="ok-text" style={{fontWeight:600}}>🔒 Credentials stored</span>
+            <button className="btn-ghost" style={{fontSize:".75rem",padding:".2rem .5rem"}}
+              onClick={() => api.clearCredentials(engagementId).then(() => setCredInfo(null))}>
+              Clear
+            </button>
+          </div>
+          <div className="cred-status-cards">
+            {credInfo.source && (
+              <div className="cred-status-card">
+                <div className="cred-status-role">SOURCE · PAS</div>
+                <div className="cred-field"><span>URL</span><code>{credInfo.source.baseUrl ?? credInfo.source.platformBaseUrl ?? "—"}</code></div>
+                <div className="cred-field"><span>Client ID</span><code>{credInfo.source.clientId}</code></div>
+                {credInfo.source.appId && <div className="cred-field"><span>App ID</span><code>{credInfo.source.appId}</code></div>}
+                <div className="cred-field"><span>Secret</span><span className="cred-masked">••••••••</span></div>
+              </div>
+            )}
+            {credInfo.target && (
+              <div className="cred-status-card">
+                <div className="cred-status-role">TARGET · SECRET SERVER</div>
+                <div className="cred-field"><span>SS URL</span><code>{credInfo.target.secretServerBaseUrl ?? credInfo.target.platformBaseUrl ?? "—"}</code></div>
+                <div className="cred-field"><span>Client ID</span><code>{credInfo.target.clientId}</code></div>
+                <div className="cred-field"><span>Secret</span><span className="cred-masked">••••••••</span></div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {engagementId && (
         <div className="conn-grid">
@@ -184,6 +221,7 @@ function ConnectionCard({ role, engagementId }: { role: Role; engagementId: stri
   const [result, setResult] = useState<TestConnectionResult | null>(null);
   const [invMsg, setInvMsg] = useState<string | null>(null);
   const [tested, setTested] = useState(false);
+
   const [saved, setSaved] = useState(false);
 
   const set = (k: keyof FormState, v: string) => {

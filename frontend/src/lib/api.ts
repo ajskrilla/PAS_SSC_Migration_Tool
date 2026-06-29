@@ -151,6 +151,17 @@ export const api = {
     credFetch(`/api/engagements/${engagementId}/credentials/status`)
       .then(json<{ source: boolean; target: boolean }>),
 
+  credentialInfo: (engagementId: string) =>
+    credFetch(`/api/engagements/${engagementId}/credentials/info`)
+      .then(json<{
+        source: { systemType: string; authMode: string; baseUrl: string | null;
+                  clientId: string; appId: string | null; clientSecretMasked: string | null;
+                  platformBaseUrl: string | null; secretServerBaseUrl: string | null } | null;
+        target: { systemType: string; authMode: string; baseUrl: string | null;
+                  clientId: string; clientSecretMasked: string | null;
+                  platformBaseUrl: string | null; secretServerBaseUrl: string | null } | null;
+      }>),
+
   clearCredentials: (engagementId: string) =>
     credFetch(`/api/engagements/${engagementId}/credentials/clear`, { method: "POST" })
       .then(json<{ cleared: boolean }>),

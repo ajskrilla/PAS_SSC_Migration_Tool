@@ -29,6 +29,8 @@ builder.Services.AddScoped<InventoryService>();
 builder.Services.AddScoped<MigrationService>();
 // Session credential store: in-memory, 60-min sliding idle, cleared on restart.
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
+// Encrypts credentials for persistence across restarts.
+builder.Services.AddScoped<CredentialEncryptionService>();
 // Tracks running migration jobs so they can be aborted from the UI.
 builder.Services.AddSingleton<JobRegistry>();
 
@@ -150,23 +152,67 @@ app.MapPut("/api/engagements/{id:guid}/connections",
 // Live auth handshake. On success, cache credentials in the session vault so subsequent
 // inventory/migration actions don't require re-entry. Credentials stay in memory only.
 app.MapPost("/api/connections/test",
-    async (TestConnectionInput input, ConnectionService svc, CredentialVault vault, CancellationToken ct) =>
+    async (TestConnectionInput input, ConnectionService svc, CredentialVault vault,
+           CredentialEncryptionService enc, IDbConnection db, CancellationToken ct) =>
     {
         var result = await svc.TestAsync(input, ct);
         if (result.Success && input.EngagementId is { } eng && input.Role is { } role)
         {
-            vault.Put(eng, role, new SessionCredentials(
+            var creds = new SessionCredentials(
                 input.SystemType, input.AuthMode, input.BaseUrl, input.PlatformBaseUrl,
                 input.SecretServerBaseUrl, input.AppId, input.ClientId, input.ClientSecret,
-                input.Username, input.Scope));
+                input.Username, input.Scope);
+            vault.Put(eng, role, creds);
+
+            // Persist encrypted credentials so they survive container restarts.
+            // Look up the tenant_connection row for this engagement+role.
+            var tcId = await db.ExecuteScalarAsync<Guid?>(
+                "SELECT id FROM tenant_connection WHERE engagement_id=@e AND role=@r LIMIT 1",
+                new { e = eng, r = role });
+            if (tcId.HasValue)
+                await enc.SaveAsync(db, tcId.Value, eng, creds);
         }
         return result.Success ? Results.Ok(result) : Results.BadRequest(result);
     });
 
+
+// Returns non-sensitive credential metadata for display (no secrets).
+app.MapGet("/api/engagements/{id:guid}/credentials/info",
+    async (Guid id, CredentialVault vault, CredentialEncryptionService enc, IDbConnection db) =>
+    {
+        if (!vault.Has(id, "source") && !vault.Has(id, "target"))
+            await enc.LoadIntoVaultAsync(db, id, vault);
+
+        static object? Mask(SessionCredentials? c) => c is null ? null : new
+        {
+            systemType    = c.SystemType,
+            authMode      = c.AuthMode,
+            baseUrl       = c.BaseUrl,
+            platformBaseUrl = c.PlatformBaseUrl,
+            secretServerBaseUrl = c.SecretServerBaseUrl,
+            clientId      = c.ClientId,
+            appId         = c.AppId,
+            scope         = c.Scope,
+            // Never return ClientSecret or Username — masked in UI
+            clientSecretMasked = c.ClientSecret.Length > 0 ? "••••••••" : null,
+        };
+
+        return Results.Ok(new
+        {
+            source = Mask(vault.Get(id, "source")),
+            target = Mask(vault.Get(id, "target")),
+        });
+    });
+
 // Which roles currently have active session credentials (for the UI badge).
 app.MapGet("/api/engagements/{id:guid}/credentials/status",
-    (Guid id, CredentialVault vault) =>
-        Results.Ok(new { source = vault.Has(id, "source"), target = vault.Has(id, "target") }));
+    async (Guid id, CredentialVault vault, CredentialEncryptionService enc, IDbConnection db) =>
+    {
+        // If vault is empty (e.g. after restart), try to load from encrypted storage.
+        if (!vault.Has(id, "source") && !vault.Has(id, "target"))
+            await enc.LoadIntoVaultAsync(db, id, vault);
+        return Results.Ok(new { source = vault.Has(id, "source"), target = vault.Has(id, "target") });
+    });
 
 // Explicit sign-out: forget session credentials for this engagement.
 app.MapPost("/api/engagements/{id:guid}/credentials/clear",
@@ -257,8 +303,13 @@ app.MapPost("/api/templates",
     });
 
 app.MapPost("/api/engagements/{id:guid}/migrate",
-    async (Guid id, MigrationRunInput input, MigrationService svc, CancellationToken ct) =>
+    async (Guid id, MigrationRunInput input, MigrationService svc,
+           CredentialVault vault, CredentialEncryptionService enc, IDbConnection db,
+           CancellationToken ct) =>
     {
+        // Auto-load persisted credentials if vault is empty (e.g. after restart).
+        if (!vault.Has(id, "source") || !vault.Has(id, "target"))
+            await enc.LoadIntoVaultAsync(db, id, vault);
         try { return Results.Ok(await svc.RunAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     });

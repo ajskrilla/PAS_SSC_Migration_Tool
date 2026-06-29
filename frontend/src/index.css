@@ -396,3 +396,82 @@ table.data tr:last-child td { border-bottom: none; }
   color: #e74c3c;
   background: rgba(231,76,60,.1);
 }
+
+/* ── Credential status display ───────────────────────────────────────────── */
+.cred-status-banner {
+  background: var(--surface-1);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: .75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.cred-status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: .5rem;
+}
+
+.cred-status-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .75rem;
+  margin-top: .5rem;
+}
+
+.cred-status-card {
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: .6rem .75rem;
+  font-size: .82rem;
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+}
+
+.cred-status-role {
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .05em;
+  color: var(--accent);
+  margin-bottom: .2rem;
+}
+
+.cred-field {
+  display: flex;
+  gap: .5rem;
+  align-items: baseline;
+}
+
+.cred-field > span:first-child {
+  color: var(--text-muted);
+  font-size: .75rem;
+  min-width: 60px;
+  flex-shrink: 0;
+}
+
+.cred-field code {
+  font-size: .78rem;
+  background: var(--surface-3);
+  padding: .1rem .3rem;
+  border-radius: 3px;
+  word-break: break-all;
+}
+
+.cred-masked {
+  font-size: .82rem;
+  letter-spacing: .1em;
+  color: var(--text-muted);
+}
+
+.cred-status-bar { border-left: 3px solid var(--accent); }
+.cred-status-bar.cred-warn { border-left-color: #f39c12; }
+.cred-status-bar.cred-ok { border-left-color: var(--accent); }
+
+.cred-pills { display: flex; gap: .3rem; flex-wrap: wrap; margin-top: .3rem; }
+.cred-pill {
+  font-size: .72rem; padding: .1rem .45rem;
+  border-radius: 99px; border: 1px solid var(--border);
+}
+.cred-pill.ok { color: var(--accent); border-color: var(--accent); background: rgba(35,229,126,.1); }
