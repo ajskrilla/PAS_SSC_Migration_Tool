@@ -5,6 +5,10 @@ using Hangfire;
 using Hangfire.PostgreSql;
 using Npgsql;
 using PasMigration.Connectors;
+using PasMigration.Auth;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Security.Claims;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -35,7 +39,41 @@ builder.Services.AddHangfire(cfg => cfg
 builder.Services.AddHangfireServer();
 
 // App-level auth (OIDC/JWT). Configuration supplied via env in real deployments.
-builder.Services.AddAuthentication("Bearer").AddJwtBearer();
+// Auth services
+builder.Services.AddScoped<AuthService>();
+builder.Services.AddHttpContextAccessor();
+
+// JWT — read secret directly from config, no BuildServiceProvider needed
+var jwtSecret = builder.Configuration["Auth__JwtSecret"]
+             ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
+             ?? "dev-secret-change-in-production-min-32-chars!!";
+var jwtKey = new SymmetricSecurityKey(
+    System.Text.Encoding.UTF8.GetBytes(jwtSecret));
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =>
+    {
+        o.TokenValidationParameters = new()
+        {
+            ValidateIssuer           = true,
+            ValidIssuer              = "pas-migration",
+            ValidateAudience         = true,
+            ValidAudience            = "pas-migration",
+            ValidateLifetime         = true,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey         = jwtKey,
+        };
+        o.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = ctx =>
+            {
+                if (ctx.Request.Cookies.TryGetValue("auth_token", out var cookieToken))
+                    ctx.Token = cookieToken;
+                return Task.CompletedTask;
+            }
+        };
+    });
+builder.Services.AddAuthorization();
 builder.Services.AddAuthorization();
 
 // In production the SPA is served same-origin through the nginx reverse proxy, so CORS
@@ -401,6 +439,93 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
             new { id });
         return Results.Ok(new { summary, items });
     });
+
+
+// ── Auth endpoints ────────────────────────────────────────────────────────────────────
+
+app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, HttpResponse response) =>
+{
+    var result = await auth.LoginAsync(req);
+    if (!result.Success)
+        return Results.Json(new { error = result.Error }, statusCode: 401);
+    response.Cookies.Append("auth_token", result.Token!, new CookieOptions
+    {
+        HttpOnly = true, Secure = false, SameSite = SameSiteMode.Strict,
+        Expires = DateTimeOffset.UtcNow.AddHours(8),
+    });
+    return Results.Ok(new { user = new {
+        id = result.User!.Id, username = result.User.Username,
+        email = result.User.Email, displayName = result.User.DisplayName,
+        role = result.User.Role, forcePasswordChange = result.User.ForcePasswordChange,
+        engagementIds = result.User.EngagementIds,
+    }});
+});
+
+app.MapPost("/api/auth/logout", (HttpResponse response) =>
+{
+    response.Cookies.Delete("auth_token");
+    return Results.Ok(new { message = "Logged out." });
+});
+
+app.MapPost("/api/auth/change-password",
+    async (ChangePasswordRequest req, AuthService auth, ClaimsPrincipal user) =>
+    {
+        var userId = Guid.Parse(user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? Guid.Empty.ToString());
+        var (ok, err) = await auth.ChangePasswordAsync(userId, req);
+        return ok ? Results.Ok(new { message = "Password changed." }) : Results.BadRequest(new { error = err });
+    }).RequireAuthorization();
+
+app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
+    Results.Ok(new {
+        id = user.FindFirst(ClaimTypes.NameIdentifier)?.Value,
+        username = user.FindFirst(ClaimTypes.Name)?.Value,
+        email = user.FindFirst(ClaimTypes.Email)?.Value,
+        role = user.FindFirst(ClaimTypes.Role)?.Value,
+        forcePasswordChange = user.FindFirst("force_pwd")?.Value == "true",
+        engagementIds = (user.FindFirst("eng_ids")?.Value ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries),
+    })).RequireAuthorization();
+
+app.MapGet("/api/admin/users",
+    async (AuthService auth) => Results.Ok(await auth.ListUsersAsync()))
+    .RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/users",
+    async (CreateUserRequest req, AuthService auth) =>
+    {
+        var (ok, msg, user) = await auth.CreateUserAsync(req);
+        return ok ? Results.Ok(new { message = msg, user }) : Results.BadRequest(new { error = msg });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/users/{id:guid}/deactivate",
+    async (Guid id, AuthService auth) =>
+    {
+        var (ok, err) = await auth.DeactivateUserAsync(id);
+        return ok ? Results.Ok(new { message = "User deactivated." }) : Results.NotFound(new { error = err });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/users/{id:guid}/reset-password",
+    async (Guid id, AuthService auth) =>
+    {
+        var (ok, msg) = await auth.ResetPasswordAsync(id);
+        return ok ? Results.Ok(new { message = msg }) : Results.NotFound(new { error = msg });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapGet("/api/diag/ollama", async (ILlmProvider llm, IConfiguration cfg) =>
+{
+    var endpoint  = cfg["Ai__Ollama__Endpoint"]  ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")  ?? "(not set)";
+    var chatModel = cfg["Ai__Ollama__ChatModel"]  ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL") ?? "(not set)";
+    var embedModel= cfg["Ai__Ollama__EmbedModel"] ?? Environment.GetEnvironmentVariable("OLLAMA_EMBED_MODEL")?? "(not set)";
+    try
+    {
+        var embedding = await llm.EmbedAsync("ping", CancellationToken.None);
+        return Results.Ok(new { endpoint, chatModel, embedModel, embed_test = "ok", embed_dims = embedding.Length });
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new { endpoint, chatModel, embedModel, embed_test = "error: " + ex.Message });
+    }
+});
 
 app.Run();
 
