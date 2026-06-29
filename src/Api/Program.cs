@@ -6,6 +6,7 @@ using Hangfire.PostgreSql;
 using Npgsql;
 using PasMigration.Connectors;
 using PasMigration.Auth;
+using PasMigration.Ai;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Security.Claims;
