@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Data;
 using System.Security.Authentication;
 using Dapper;
@@ -5,7 +6,9 @@ using Hangfire;
 using Hangfire.PostgreSql;
 using Npgsql;
 using PasMigration.Connectors;
-using PasMigration.Ai;
+using PasMigration.Auth;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,24 +30,46 @@ builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Tracks running migration jobs so they can be aborted from the UI.
 builder.Services.AddSingleton<JobRegistry>();
 
-// Named HttpClient for Ollama (default: http://ollama:11434, overridable via Ai__Ollama__Endpoint).
-builder.Services.AddHttpClient("ollama", (sp, c) =>
-{
-    var cfg = sp.GetRequiredService<IConfiguration>();
-    var endpoint = cfg["Ai__Ollama__Endpoint"]
-                ?? cfg["OLLAMA_ENDPOINT"]
-                ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")
-                ?? "http://ollama:11434";
-    c.BaseAddress = new Uri(endpoint);
-    c.Timeout = TimeSpan.FromSeconds(120);
-});
+// Auth
+builder.Services.AddScoped<AuthService>();
+builder.Services.AddHttpContextAccessor();
 
-// AI layer - provider + catalog are singletons; router + service are scoped.
-builder.Services.AddSingleton<OllamaProvider>();              // concrete — needed for streaming
-builder.Services.AddSingleton<ILlmProvider>(sp => sp.GetRequiredService<OllamaProvider>());
-builder.Services.AddSingleton<AssistantCatalog>();
-builder.Services.AddScoped<AssistantRouter>();
-builder.Services.AddScoped<AssistantService>();
+// JWT authentication
+var authService = new AuthService(
+    null!, // db injected per-request; use cfg here just for key
+    builder.Configuration,
+    builder.Services.BuildServiceProvider().GetRequiredService<ILogger<AuthService>>());
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =>
+    {
+        var jwtSecret = builder.Configuration["Auth__JwtSecret"]
+                     ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
+                     ?? "dev-secret-change-in-production-min-32-chars!!";
+        var key = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(
+            System.Text.Encoding.UTF8.GetBytes(jwtSecret));
+        o.TokenValidationParameters = new()
+        {
+            ValidateIssuer           = true,
+            ValidIssuer              = "pas-migration",
+            ValidateAudience         = true,
+            ValidAudience            = "pas-migration",
+            ValidateLifetime         = true,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey         = key,
+        };
+        // Support cookie-based JWT (httpOnly, more secure than localStorage)
+        o.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = ctx =>
+            {
+                if (ctx.Request.Cookies.TryGetValue("auth_token", out var cookieToken))
+                    ctx.Token = cookieToken;
+                return Task.CompletedTask;
+            }
+        };
+    });
+builder.Services.AddAuthorization();
 
 // Resumable background jobs (migration orchestrator) backed by Postgres.
 builder.Services.AddHangfire(cfg => cfg
@@ -94,6 +119,9 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 // Liveness/readiness. Readiness pings the DB.
+app.UseAuthentication();
+app.UseAuthorization();
+
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet("/health/ready", async (IDbConnection db) =>
 {
@@ -303,7 +331,7 @@ app.MapGet("/api/engagements/{id:guid}/metrics",
 
         var progress = (await db.QueryAsync(
             $@"SELECT q.item_type AS type, COUNT(*) AS total,
-                      COUNT(CASE WHEN mi.status IN ('migrated','succeeded') OR mi.target_native_id IS NOT NULL THEN 1 END) AS migrated
+                      COUNT(mi.target_native_id) AS migrated
                FROM ({latestSource}) q
                LEFT JOIN migration_item mi
                  ON mi.engagement_id=@id AND mi.item_type=q.item_type
@@ -400,9 +428,9 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
         var summary = await db.QueryAsync(
             @"SELECT item_type,
                      COUNT(*) AS total,
-                     COUNT(*) FILTER (WHERE status IN ('migrated','succeeded') OR target_native_id IS NOT NULL) AS migrated,
+                     COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated,
                      COUNT(*) FILTER (WHERE status='failed') AS failed,
-                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','succeeded','failed') AND target_native_id IS NULL) AS pending
+                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','failed') AND target_native_id IS NULL) AS pending
               FROM migration_item WHERE engagement_id=@id
               GROUP BY item_type ORDER BY item_type",
             new { id });
@@ -415,76 +443,92 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
     });
 
 
-// Assistant: streaming SSE endpoint. Client reads token-by-token for real-time display.
-app.MapPost("/api/engagements/{id:guid}/assistant",
-    async (Guid id, AssistantRequest req, AssistantService svc, HttpResponse response, CancellationToken ct) =>
+// ── Auth endpoints (public — no [Authorize]) ─────────────────────────────────────────
+
+app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, HttpResponse response) =>
+{
+    var result = await auth.LoginAsync(req);
+    if (!result.Success)
+        return Results.Json(new { error = result.Error }, statusCode: 401);
+
+    // Set httpOnly cookie — never accessible to JS, safer than localStorage
+    response.Cookies.Append("auth_token", result.Token!, new CookieOptions
     {
-        response.Headers["Content-Type"]  = "text/event-stream";
-        response.Headers["Cache-Control"] = "no-cache";
-        response.Headers["X-Accel-Buffering"] = "no";
-        await response.Body.FlushAsync(ct);
-
-        // SSE ping bytes — ": ping\n\n" keeps browser + nginx alive during slow inference.
-        // Written as raw bytes to avoid string escape issues.
-        var pingBytes = new byte[] { 58, 32, 112, 105, 110, 103, 10, 10 }; // ": ping\n\n"
-
-
-        using var pingTimer = new System.Threading.PeriodicTimer(TimeSpan.FromSeconds(15));
-        var pingTask = Task.Run(async () =>
-        {
-            while (await pingTimer.WaitForNextTickAsync(ct).ConfigureAwait(false))
-            {
-                try
-                {
-                    await response.Body.WriteAsync(pingBytes, ct);
-                    await response.Body.FlushAsync(ct);
-                }
-                catch { break; }
-            }
-        }, ct);
-
-        try
-        {
-            await foreach (var chunk in svc.AskStreamAsync(id, req.Question, req.History, ct))
-            {
-                if (ct.IsCancellationRequested) break;
-                await response.WriteAsync(chunk, ct);
-                await response.Body.FlushAsync(ct);
-            }
-        }
-        finally
-        {
-            pingTimer.Dispose();
-        }
+        HttpOnly  = true,
+        Secure    = false,  // set true behind HTTPS in prod
+        SameSite  = SameSiteMode.Strict,
+        Expires   = DateTimeOffset.UtcNow.AddHours(8),
     });
 
-
-// Diagnostic: test Ollama connectivity and config from inside the API container.
-app.MapGet("/api/diag/ollama", async (ILlmProvider llm, IConfiguration cfg) =>
-{
-    var endpoint  = cfg["Ai__Ollama__Endpoint"]  ?? cfg["OLLAMA_ENDPOINT"]  ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")  ?? "(not set)";
-    var chatModel = cfg["Ai__Ollama__ChatModel"]  ?? cfg["OLLAMA_CHAT_MODEL"] ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL") ?? "(not set)";
-    var embedModel= cfg["Ai__Ollama__EmbedModel"] ?? cfg["OLLAMA_EMBED_MODEL"]?? Environment.GetEnvironmentVariable("OLLAMA_EMBED_MODEL")?? "(not set)";
-    try
+    return Results.Ok(new
     {
-        var embedding = await llm.EmbedAsync("ping", CancellationToken.None);
-        var embedOk = embedding.Length > 0;
-        return Results.Ok(new
+        user = new
         {
-            endpoint, chatModel, embedModel,
-            embed_test = embedOk ? "ok" : "failed",
-            embed_dims = embedding.Length,
-        });
-    }
-    catch (Exception ex)
-    {
-        return Results.Ok(new
-        {
-            endpoint, chatModel, embedModel,
-            embed_test = "error: " + ex.Message,
-        });
-    }
+            id                  = result.User!.Id,
+            username            = result.User.Username,
+            email               = result.User.Email,
+            displayName         = result.User.DisplayName,
+            role                = result.User.Role,
+            forcePasswordChange = result.User.ForcePasswordChange,
+            engagementIds       = result.User.EngagementIds,
+        }
+    });
 });
+
+app.MapPost("/api/auth/logout", (HttpResponse response) =>
+{
+    response.Cookies.Delete("auth_token");
+    return Results.Ok(new { message = "Logged out." });
+});
+
+app.MapPost("/api/auth/change-password",
+    async (ChangePasswordRequest req, AuthService auth, ClaimsPrincipal user) =>
+    {
+        var userId = Guid.Parse(user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? Guid.Empty.ToString());
+        var (ok, err) = await auth.ChangePasswordAsync(userId, req);
+        return ok ? Results.Ok(new { message = "Password changed." }) : Results.BadRequest(new { error = err });
+    }).RequireAuthorization();
+
+app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
+{
+    return Results.Ok(new
+    {
+        id                  = user.FindFirst(ClaimTypes.NameIdentifier)?.Value,
+        username            = user.FindFirst(ClaimTypes.Name)?.Value,
+        email               = user.FindFirst(ClaimTypes.Email)?.Value,
+        role                = user.FindFirst(ClaimTypes.Role)?.Value,
+        forcePasswordChange = user.FindFirst("force_pwd")?.Value == "true",
+        engagementIds       = (user.FindFirst("eng_ids")?.Value ?? "")
+                                .Split(',', StringSplitOptions.RemoveEmptyEntries),
+    });
+}).RequireAuthorization();
+
+// ── Admin: user management ────────────────────────────────────────────────────────────
+
+app.MapGet("/api/admin/users",
+    async (AuthService auth) => Results.Ok(await auth.ListUsersAsync()))
+    .RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/users",
+    async (CreateUserRequest req, AuthService auth) =>
+    {
+        var (ok, msg, user) = await auth.CreateUserAsync(req);
+        return ok ? Results.Ok(new { message = msg, user }) : Results.BadRequest(new { error = msg });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/users/{id:guid}/deactivate",
+    async (Guid id, AuthService auth) =>
+    {
+        var (ok, err) = await auth.DeactivateUserAsync(id);
+        return ok ? Results.Ok(new { message = "User deactivated." }) : Results.NotFound(new { error = err });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/users/{id:guid}/reset-password",
+    async (Guid id, AuthService auth) =>
+    {
+        var (ok, msg) = await auth.ResetPasswordAsync(id);
+        return ok ? Results.Ok(new { message = msg }) : Results.NotFound(new { error = msg });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
 
 app.Run();
 

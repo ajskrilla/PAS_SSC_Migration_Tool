@@ -19,6 +19,7 @@
     <Compile Include="../Migration/**/*.cs" />
     <Compile Include="../Verification/**/*.cs" />
     <Compile Include="../Ai/**/*.cs" />
+    <Compile Include="../Auth/**/*.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -27,7 +28,7 @@
     <PackageReference Include="Hangfire.AspNetCore" Version="1.8.*" />
     <PackageReference Include="Hangfire.PostgreSql" Version="1.20.*" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
-    <!-- Override vulnerable transitive Newtonsoft.Json pulled in by Hangfire -->
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 
