@@ -311,3 +311,13 @@ table.data tr:last-child td { border-bottom: none; }
   padding: 1rem;
   overflow-x: auto;
 }
+
+/* ── Migrated item in checklist ──────────────────────────────────────────── */
+.check-row-done {
+  opacity: 0.55;
+  background: var(--surface-2);
+}
+.check-row-done .check-name {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}

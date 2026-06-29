@@ -25,53 +25,27 @@ const blankConn = (): MigrateConnection => ({
   ssClientId: "", ssClientSecret: "",
 });
 
-// Persist non-sensitive migration state across navigation.
-// Credentials are intentionally NOT persisted (security).
-const MIG_KEY = "migration_state";
-function loadMigState() {
-  try {
-    const r = sessionStorage.getItem(MIG_KEY);
-    return r ? JSON.parse(r) : {};
-  } catch { return {}; }
-}
-function saveMigState(patch: Record<string, unknown>) {
-  try {
-    const cur = loadMigState();
-    sessionStorage.setItem(MIG_KEY, JSON.stringify({ ...cur, ...patch }));
-  } catch { /* quota */ }
-}
-
 export function Migration() {
-  const _saved = loadMigState();
   const [engagements, setEngagements] = useState<Engagement[]>([]);
-  const [engagementId, setEngagementId] = useState<string>(_saved.engagementId ?? "");
-  const [jobType, setJobType] = useState<JobType>(_saved.jobType ?? "text_secret");
+  const [engagementId, setEngagementId] = useState("");
+  const [jobType, setJobType] = useState<JobType>("text_secret");
   const [items, setItems] = useState<SourceItemRow[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [conn, setConn] = useState<MigrateConnection>(blankConn());
-  const [staging, setStaging] = useState<string>(_saved.staging ?? "");
-  const [dryRun, setDryRun] = useState<boolean>(_saved.dryRun ?? true);
+  const [staging, setStaging] = useState("");
+  const [dryRun, setDryRun] = useState(true);
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<MigrationJobResult | null>(_saved.result ?? null);
-  const [report, setReport] = useState<MigrationReport | null>(_saved.report ?? null);
-  const [msg, setMsg] = useState<string | null>(_saved.msg ?? null);
+  const [result, setResult] = useState<MigrationJobResult | null>(null);
+  const [report, setReport] = useState<MigrationReport | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<MigrationStatus | null>(_saved.status ?? null);
+  const [status, setStatus] = useState<MigrationStatus | null>(null);
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [textTemplateId, setTextTemplateId] = useState<number | "">("");
   const [fileTemplateId, setFileTemplateId] = useState<number | "">("");
   const [tplMsg, setTplMsg] = useState<string | null>(null);
-
-  // Persist non-sensitive state whenever it changes
-  useEffect(() => { saveMigState({ engagementId }); }, [engagementId]);
-  useEffect(() => { saveMigState({ jobType }); }, [jobType]);
-  useEffect(() => { saveMigState({ staging }); }, [staging]);
-  useEffect(() => { saveMigState({ dryRun }); }, [dryRun]);
-  useEffect(() => { saveMigState({ result }); }, [result]);
-  useEffect(() => { saveMigState({ report }); }, [report]);
-  useEffect(() => { saveMigState({ status }); }, [status]);
-  useEffect(() => { saveMigState({ msg }); }, [msg]);
+  const [hideMigrated, setHideMigrated] = useState(false);
 
   // Pick a sensible default template by name (user can override).
   const pickDefault = (opts: TemplateOption[], wanted: RegExp, exclude?: RegExp) => {
@@ -139,13 +113,7 @@ export function Migration() {
   useEffect(() => {
     api.listEngagements().then((rows) => {
       setEngagements(rows);
-      const savedId = _saved.engagementId;
-      if (rows.length && !savedId) setEngagementId(rows[0].id);
-      // If we restored a saved engagement, refresh status + report from server
-      if (savedId && rows.some((r: Engagement) => r.id === savedId)) {
-        api.migrationStatus(savedId).then(setStatus).catch(() => {});
-        api.migrationReport(savedId).then(setReport).catch(() => {});
-      }
+      if (rows.length && !engagementId) setEngagementId(rows[0].id);
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -395,17 +363,32 @@ export function Migration() {
             <p className="muted">No items of this type in the latest source inventory.</p>
           ) : (
             <div className="checklist">
-              {items.map((it) => (
-                <label key={it.source_native_id} className="check-row">
-                  <input type="checkbox" checked={selected.has(it.source_native_id)}
-                    onChange={() => toggle(it.source_native_id)} />
-                  <span className="check-name">{it.name}</span>
-                  <span className="muted check-path">{it.folder_path || "—"}</span>
-                </label>
-              ))}
+              {items
+                .filter(it => !hideMigrated || !(it.is_migrated || it.migration_status === "succeeded" || it.migration_status === "migrated"))
+                .map((it) => {
+                  const done = it.is_migrated || it.migration_status === "succeeded" || it.migration_status === "migrated";
+                  return (
+                    <label key={it.source_native_id}
+                      className={"check-row" + (done ? " check-row-done" : "")}>
+                      <input type="checkbox" checked={selected.has(it.source_native_id)}
+                        onChange={() => toggle(it.source_native_id)} />
+                      <span className="check-name">{it.name}</span>
+                      <span className="muted check-path">{it.folder_path || "—"}</span>
+                      {done && <span className="tag ok" style={{fontSize:".7rem",marginLeft:"auto"}}>✓ migrated</span>}
+                    </label>
+                  );
+                })}
             </div>
           )}
-          <p className="muted note">{selected.size} of {items.length} selected</p>
+          <p className="muted note">
+            {selected.size} of {items.length} selected
+            {items.some(it => it.is_migrated || it.migration_status === "succeeded") && (
+              <button className="btn-ghost" style={{marginLeft:".75rem",fontSize:".78rem",padding:".15rem .5rem"}}
+                onClick={() => setHideMigrated(h => !h)}>
+                {hideMigrated ? `Show migrated (${items.filter(it => it.is_migrated || it.migration_status === "succeeded" || it.migration_status === "migrated").length})` : "Hide migrated"}
+              </button>
+            )}
+          </p>
         </div>
       )}
 

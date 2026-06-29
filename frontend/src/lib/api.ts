@@ -162,7 +162,6 @@ export const api = {
     fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" })
       .then((r) => r.json() as Promise<{ cancelled?: boolean; message?: string }>),
 
-
   migrationStatus: (engagementId: string) =>
     fetch(`/api/engagements/${engagementId}/migration-status`)
       .then(json<MigrationStatus>),
@@ -244,6 +243,8 @@ export interface SourceItemRow {
   name: string;
   folder_path: string | null;
   is_managed: boolean | null;
+  migration_status: string | null;   // succeeded | migrated | failed | pending | null
+  is_migrated: boolean | null;
 }
 
 // Connection fields reused for migrate + revert (credentials session-only).

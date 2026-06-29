@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using System.Data;
 using System.Security.Authentication;
 using Dapper;
@@ -6,9 +5,6 @@ using Hangfire;
 using Hangfire.PostgreSql;
 using Npgsql;
 using PasMigration.Connectors;
-using PasMigration.Auth;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,43 +26,6 @@ builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Tracks running migration jobs so they can be aborted from the UI.
 builder.Services.AddSingleton<JobRegistry>();
 
-// Auth
-builder.Services.AddScoped<AuthService>();
-builder.Services.AddHttpContextAccessor();
-
-// JWT authentication — read the secret directly from config/env, no BuildServiceProvider needed
-var jwtSecret = builder.Configuration["Auth__JwtSecret"]
-             ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
-             ?? "dev-secret-change-in-production-min-32-chars!!";
-var jwtKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(
-    System.Text.Encoding.UTF8.GetBytes(jwtSecret));
-
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(o =>
-    {
-        o.TokenValidationParameters = new()
-        {
-            ValidateIssuer           = true,
-            ValidIssuer              = "pas-migration",
-            ValidateAudience         = true,
-            ValidAudience            = "pas-migration",
-            ValidateLifetime         = true,
-            ValidateIssuerSigningKey = true,
-            IssuerSigningKey         = jwtKey,
-        };
-        // Support cookie-based JWT (httpOnly, more secure than localStorage)
-        o.Events = new JwtBearerEvents
-        {
-            OnMessageReceived = ctx =>
-            {
-                if (ctx.Request.Cookies.TryGetValue("auth_token", out var cookieToken))
-                    ctx.Token = cookieToken;
-                return Task.CompletedTask;
-            }
-        };
-    });
-builder.Services.AddAuthorization();
-
 // Resumable background jobs (migration orchestrator) backed by Postgres.
 builder.Services.AddHangfire(cfg => cfg
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
@@ -76,7 +35,7 @@ builder.Services.AddHangfire(cfg => cfg
 builder.Services.AddHangfireServer();
 
 // App-level auth (OIDC/JWT). Configuration supplied via env in real deployments.
-// Authentication handled by the JWT block above.
+builder.Services.AddAuthentication("Bearer").AddJwtBearer();
 builder.Services.AddAuthorization();
 
 // In production the SPA is served same-origin through the nginx reverse proxy, so CORS
@@ -115,9 +74,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 // Liveness/readiness. Readiness pings the DB.
-app.UseAuthentication();
-app.UseAuthorization();
-
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet("/health/ready", async (IDbConnection db) =>
 {
@@ -364,19 +320,27 @@ app.MapGet("/api/engagements/{id:guid}/metrics",
 app.MapGet("/api/engagements/{id:guid}/source-items",
     async (Guid id, IDbConnection db, string? type, string? scope) =>
     {
-        var sql = @"SELECT ii.item_type, ii.source_native_id, ii.name, ii.folder_path, ii.is_managed
+        var sql = @"SELECT ii.item_type, ii.source_native_id, ii.name, ii.folder_path, ii.is_managed,
+                           COALESCE(mi.status, 'pending') AS migration_status,
+                           mi.target_native_id IS NOT NULL AS is_migrated
                     FROM inventory_item ii
                     JOIN inventory_snapshot s ON s.id = ii.snapshot_id
                     JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+                    LEFT JOIN migration_item mi
+                           ON mi.engagement_id = @id
+                          AND mi.item_type = ii.item_type
+                          AND mi.source_native_id = ii.source_native_id
                     WHERE s.engagement_id=@id AND tc.role='source'
                       AND s.captured_at = (
                         SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
                         JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
                         WHERE s2.engagement_id=@id AND tc2.role='source')"
                   + (type is null ? "" : " AND ii.item_type=@type")
-                  // For accounts, optionally filter by scope (local|domain) read from attributes.
                   + (scope is null ? "" : " AND ii.attributes->>'AccountScope' = @scope")
-                  + " ORDER BY ii.item_type, ii.name";
+                  + @" ORDER BY
+                        CASE WHEN COALESCE(mi.status,'pending') IN ('succeeded','migrated')
+                             THEN 1 ELSE 0 END,
+                        ii.item_type, ii.name";
         return Results.Ok(await db.QueryAsync(sql, new { id, type, scope }));
     });
 
@@ -437,94 +401,6 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
             new { id });
         return Results.Ok(new { summary, items });
     });
-
-
-// ── Auth endpoints (public — no [Authorize]) ─────────────────────────────────────────
-
-app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, HttpResponse response) =>
-{
-    var result = await auth.LoginAsync(req);
-    if (!result.Success)
-        return Results.Json(new { error = result.Error }, statusCode: 401);
-
-    // Set httpOnly cookie — never accessible to JS, safer than localStorage
-    response.Cookies.Append("auth_token", result.Token!, new CookieOptions
-    {
-        HttpOnly  = true,
-        Secure    = false,  // set true behind HTTPS in prod
-        SameSite  = SameSiteMode.Strict,
-        Expires   = DateTimeOffset.UtcNow.AddHours(8),
-    });
-
-    return Results.Ok(new
-    {
-        user = new
-        {
-            id                  = result.User!.Id,
-            username            = result.User.Username,
-            email               = result.User.Email,
-            displayName         = result.User.DisplayName,
-            role                = result.User.Role,
-            forcePasswordChange = result.User.ForcePasswordChange,
-            engagementIds       = result.User.EngagementIds,
-        }
-    });
-});
-
-app.MapPost("/api/auth/logout", (HttpResponse response) =>
-{
-    response.Cookies.Delete("auth_token");
-    return Results.Ok(new { message = "Logged out." });
-});
-
-app.MapPost("/api/auth/change-password",
-    async (ChangePasswordRequest req, AuthService auth, ClaimsPrincipal user) =>
-    {
-        var userId = Guid.Parse(user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? Guid.Empty.ToString());
-        var (ok, err) = await auth.ChangePasswordAsync(userId, req);
-        return ok ? Results.Ok(new { message = "Password changed." }) : Results.BadRequest(new { error = err });
-    }).RequireAuthorization();
-
-app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
-{
-    return Results.Ok(new
-    {
-        id                  = user.FindFirst(ClaimTypes.NameIdentifier)?.Value,
-        username            = user.FindFirst(ClaimTypes.Name)?.Value,
-        email               = user.FindFirst(ClaimTypes.Email)?.Value,
-        role                = user.FindFirst(ClaimTypes.Role)?.Value,
-        forcePasswordChange = user.FindFirst("force_pwd")?.Value == "true",
-        engagementIds       = (user.FindFirst("eng_ids")?.Value ?? "")
-                                .Split(',', StringSplitOptions.RemoveEmptyEntries),
-    });
-}).RequireAuthorization();
-
-// ── Admin: user management ────────────────────────────────────────────────────────────
-
-app.MapGet("/api/admin/users",
-    async (AuthService auth) => Results.Ok(await auth.ListUsersAsync()))
-    .RequireAuthorization(p => p.RequireRole("admin"));
-
-app.MapPost("/api/admin/users",
-    async (CreateUserRequest req, AuthService auth) =>
-    {
-        var (ok, msg, user) = await auth.CreateUserAsync(req);
-        return ok ? Results.Ok(new { message = msg, user }) : Results.BadRequest(new { error = msg });
-    }).RequireAuthorization(p => p.RequireRole("admin"));
-
-app.MapPost("/api/admin/users/{id:guid}/deactivate",
-    async (Guid id, AuthService auth) =>
-    {
-        var (ok, err) = await auth.DeactivateUserAsync(id);
-        return ok ? Results.Ok(new { message = "User deactivated." }) : Results.NotFound(new { error = err });
-    }).RequireAuthorization(p => p.RequireRole("admin"));
-
-app.MapPost("/api/admin/users/{id:guid}/reset-password",
-    async (Guid id, AuthService auth) =>
-    {
-        var (ok, msg) = await auth.ResetPasswordAsync(id);
-        return ok ? Results.Ok(new { message = msg }) : Results.NotFound(new { error = msg });
-    }).RequireAuthorization(p => p.RequireRole("admin"));
 
 app.Run();
 

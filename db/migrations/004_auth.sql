@@ -23,7 +23,7 @@ VALUES (
     'System Administrator',
     'admin',
     -- BCrypt hash of 'Admin@Migration1!' at cost 12
-    '$2a$12$X.sHEwVpz5e2b7e5jK0RZuZ3eQ8mY4nP1gL7rF9cV2kT0wA8dN6qO',
+    '$2b$12$vH9frw/SVGjz2cnV/3VMMuyDvcanqZA/cGx84twnIC19LdP39Rj2.',
     true
 ) ON CONFLICT (email) DO NOTHING;
 
