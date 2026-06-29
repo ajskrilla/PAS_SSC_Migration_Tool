@@ -38,6 +38,11 @@ export interface TestConnectionInput {
   role?: "source" | "target";
 }
 
+// All API calls include credentials (httpOnly JWT cookie) for auth.
+function credFetch(url: string, opts: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...opts, credentials: "include" });
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     // Try to surface a structured error body if present.
@@ -52,18 +57,18 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  ready: () => fetch("/health/ready").then((r) => r.ok),
+  ready: () => credFetch("/health/ready").then((r) => r.ok),
 
-  listEngagements: () => fetch("/api/engagements").then(json<Engagement[]>),
+  listEngagements: () => credFetch("/api/engagements").then(json<Engagement[]>),
   createEngagement: (name: string, customerName: string) =>
-    fetch("/api/engagements", {
+    credFetch("/api/engagements", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, customerName }),
     }).then(json<{ id: string }>),
 
   listConnections: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/connections`).then(json<TenantConnection[]>),
+    credFetch(`/api/engagements/${engagementId}/connections`).then(json<TenantConnection[]>),
 
   saveConnection: (
     engagementId: string,
@@ -75,7 +80,7 @@ export const api = {
       authMode: "platform_client_credentials" | "legacy_password";
     },
   ) =>
-    fetch(`/api/engagements/${engagementId}/connections`, {
+    credFetch(`/api/engagements/${engagementId}/connections`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -83,7 +88,7 @@ export const api = {
 
   // Always resolves to a result object; rejects only on network failure.
   testConnection: async (input: TestConnectionInput): Promise<TestConnectionResult> => {
-    const res = await fetch("/api/connections/test", {
+    const res = await credFetch("/api/connections/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -93,81 +98,81 @@ export const api = {
 
   // Run a full inventory capture for one tenant role (reuses session credentials).
   runInventory: (engagementId: string, input: TestConnectionInput & { role: "source" | "target" }) =>
-    fetch(`/api/engagements/${engagementId}/inventory/run`, {
+    credFetch(`/api/engagements/${engagementId}/inventory/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }).then(json<InventoryRunResult>),
 
   reconcile: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/reconcile`, { method: "POST" })
+    credFetch(`/api/engagements/${engagementId}/reconcile`, { method: "POST" })
       .then(json<{ count: number }>),
 
   inventorySummary: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/inventory/summary`).then(json<SnapshotSummary[]>),
+    credFetch(`/api/engagements/${engagementId}/inventory/summary`).then(json<SnapshotSummary[]>),
 
   snapshotItems: (snapshotId: string, type?: string) =>
-    fetch(`/api/snapshots/${snapshotId}/items${type ? `?type=${type}` : ""}`)
+    credFetch(`/api/snapshots/${snapshotId}/items${type ? `?type=${type}` : ""}`)
       .then(json<InventoryItem[]>),
 
   reconciliation: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/reconciliation`).then(json<ReconRow[]>),
+    credFetch(`/api/engagements/${engagementId}/reconciliation`).then(json<ReconRow[]>),
 
   metrics: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/metrics`).then(json<Metrics>),
+    credFetch(`/api/engagements/${engagementId}/metrics`).then(json<Metrics>),
 
   sourceItems: (engagementId: string, type?: string, scope?: string) => {
     const params = new URLSearchParams();
     if (type) params.set("type", type);
     if (scope) params.set("scope", scope);
     const qs = params.toString();
-    return fetch(`/api/engagements/${engagementId}/source-items${qs ? `?${qs}` : ""}`)
+    return credFetch(`/api/engagements/${engagementId}/source-items${qs ? `?${qs}` : ""}`)
       .then(json<SourceItemRow[]>);
   },
 
   migrate: (engagementId: string, input: MigrateInput) =>
-    fetch(`/api/engagements/${engagementId}/migrate`, {
+    credFetch(`/api/engagements/${engagementId}/migrate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }).then(json<MigrationJobResult>),
 
   revert: (engagementId: string, connection: MigrateConnection) =>
-    fetch(`/api/engagements/${engagementId}/revert`, {
+    credFetch(`/api/engagements/${engagementId}/revert`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ confirm: true, connection }),
     }).then(json<{ deleted: number; failed: number }>),
 
   migrationReport: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/migration/report`).then(json<MigrationReport>),
+    credFetch(`/api/engagements/${engagementId}/migration/report`).then(json<MigrationReport>),
 
   credentialStatus: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/credentials/status`)
+    credFetch(`/api/engagements/${engagementId}/credentials/status`)
       .then(json<{ source: boolean; target: boolean }>),
 
   clearCredentials: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/credentials/clear`, { method: "POST" })
+    credFetch(`/api/engagements/${engagementId}/credentials/clear`, { method: "POST" })
       .then(json<{ cleared: boolean }>),
 
   logs: (engagementId: string, limit = 50, offset = 0) =>
-    fetch(`/api/engagements/${engagementId}/logs?limit=${limit}&offset=${offset}`)
+    credFetch(`/api/engagements/${engagementId}/logs?limit=${limit}&offset=${offset}`)
       .then(json<LogPage>),
 
   runningJob: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/running-job`)
+    credFetch(`/api/engagements/${engagementId}/running-job`)
       .then(json<{ running: boolean; job?: { id: string; job_type: string } }>),
 
   cancelJob: (jobId: string) =>
-    fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" })
+    credFetch(`/api/jobs/${jobId}/cancel`, { method: "POST" })
       .then((r) => r.json() as Promise<{ cancelled?: boolean; message?: string }>),
 
   migrationStatus: (engagementId: string) =>
-    fetch(`/api/engagements/${engagementId}/migration-status`)
+    credFetch(`/api/engagements/${engagementId}/migration-status`)
       .then(json<MigrationStatus>),
 
   listTemplates: (conn: Record<string, unknown>) =>
-    fetch(`/api/templates`, {
+    credFetch(`/api/templates`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -182,7 +187,7 @@ export const api = {
     }).then(json<TemplateOption[]>),
 
   createFileTemplate: (conn: Record<string, unknown>, name: string) =>
-    fetch(`/api/templates/create-file`, {
+    credFetch(`/api/templates/create-file`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -243,7 +248,7 @@ export interface SourceItemRow {
   name: string;
   folder_path: string | null;
   is_managed: boolean | null;
-  migration_status: string | null;   // succeeded | migrated | failed | pending | null
+  migration_status: string | null;
   is_migrated: boolean | null;
 }
 

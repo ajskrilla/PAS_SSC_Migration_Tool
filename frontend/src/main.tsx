@@ -71,12 +71,16 @@ function Shell() {
           ))}
         </nav>
         <div className="rail-foot">
-          <div className="nav-user-info">
-            <span className="nav-username">{user.displayName || user.username}</span>
-            <span className="muted" style={{ fontSize: ".7rem" }}>{user.role}</span>
+          <div className="rail-user">
+            <div className="rail-user-avatar">{(user.displayName || user.username).charAt(0).toUpperCase()}</div>
+            <div className="rail-user-info">
+              <span className="rail-user-name">{user.displayName || user.username}</span>
+              <span className="rail-user-role">{user.role}</span>
+            </div>
           </div>
-          <button className="btn-ghost" style={{ fontSize: ".72rem", padding: ".2rem .5rem", marginTop: ".3rem" }}
-            onClick={handleLogout}>Sign out</button>
+          <button className="rail-signout" onClick={handleLogout} title="Sign out">
+            ⏻
+          </button>
         </div>
       </aside>
       <main className="content">
