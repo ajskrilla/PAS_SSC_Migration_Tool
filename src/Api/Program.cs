@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc;
 using System.Data;
 using System.Security.Authentication;
 using Dapper;
@@ -488,7 +489,7 @@ app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
     })).RequireAuthorization();
 
 app.MapGet("/api/admin/users",
-    async (AuthService auth) => Results.Ok(await auth.ListUsersAsync()))
+    async ([FromServices] AuthService auth) => Results.Ok(await auth.ListUsersAsync()))
     .RequireAuthorization(p => p.RequireRole("admin"));
 
 app.MapPost("/api/admin/users",
@@ -512,7 +513,7 @@ app.MapPost("/api/admin/users/{id:guid}/reset-password",
         return ok ? Results.Ok(new { message = msg }) : Results.NotFound(new { error = msg });
     }).RequireAuthorization(p => p.RequireRole("admin"));
 
-app.MapGet("/api/diag/ollama", async (ILlmProvider llm, IConfiguration cfg) =>
+app.MapGet("/api/diag/ollama", async ([FromServices] ILlmProvider llm, [FromServices] IConfiguration cfg) =>
 {
     var endpoint  = cfg["Ai__Ollama__Endpoint"]  ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")  ?? "(not set)";
     var chatModel = cfg["Ai__Ollama__ChatModel"]  ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL") ?? "(not set)";
