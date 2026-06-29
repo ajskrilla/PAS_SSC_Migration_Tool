@@ -34,20 +34,16 @@ builder.Services.AddSingleton<JobRegistry>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddHttpContextAccessor();
 
-// JWT authentication
-var authService = new AuthService(
-    null!, // db injected per-request; use cfg here just for key
-    builder.Configuration,
-    builder.Services.BuildServiceProvider().GetRequiredService<ILogger<AuthService>>());
+// JWT authentication — read the secret directly from config/env, no BuildServiceProvider needed
+var jwtSecret = builder.Configuration["Auth__JwtSecret"]
+             ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
+             ?? "dev-secret-change-in-production-min-32-chars!!";
+var jwtKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(
+    System.Text.Encoding.UTF8.GetBytes(jwtSecret));
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(o =>
     {
-        var jwtSecret = builder.Configuration["Auth__JwtSecret"]
-                     ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
-                     ?? "dev-secret-change-in-production-min-32-chars!!";
-        var key = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(
-            System.Text.Encoding.UTF8.GetBytes(jwtSecret));
         o.TokenValidationParameters = new()
         {
             ValidateIssuer           = true,
@@ -56,7 +52,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidAudience            = "pas-migration",
             ValidateLifetime         = true,
             ValidateIssuerSigningKey = true,
-            IssuerSigningKey         = key,
+            IssuerSigningKey         = jwtKey,
         };
         // Support cookie-based JWT (httpOnly, more secure than localStorage)
         o.Events = new JwtBearerEvents
