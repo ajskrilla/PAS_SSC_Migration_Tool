@@ -76,7 +76,7 @@ builder.Services.AddHangfire(cfg => cfg
 builder.Services.AddHangfireServer();
 
 // App-level auth (OIDC/JWT). Configuration supplied via env in real deployments.
-builder.Services.AddAuthentication("Bearer").AddJwtBearer();
+// Authentication handled by the JWT block above.
 builder.Services.AddAuthorization();
 
 // In production the SPA is served same-origin through the nginx reverse proxy, so CORS
