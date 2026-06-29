@@ -470,11 +470,26 @@ app.MapPost("/api/auth/logout", (HttpResponse response) =>
 });
 
 app.MapPost("/api/auth/change-password",
-    async (ChangePasswordRequest req, AuthService auth, ClaimsPrincipal user) =>
+    async (ChangePasswordRequest req, AuthService auth, ClaimsPrincipal user,
+           HttpResponse response) =>
     {
         var userId = Guid.Parse(user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? Guid.Empty.ToString());
         var (ok, err) = await auth.ChangePasswordAsync(userId, req);
-        return ok ? Results.Ok(new { message = "Password changed." }) : Results.BadRequest(new { error = err });
+        if (!ok) return Results.BadRequest(new { error = err });
+
+        // Re-issue JWT so force_pwd claim is updated to false in the new token.
+        var users = await auth.ListUsersAsync();
+        var updated = users.FirstOrDefault(u => u.Id == userId);
+        if (updated is not null)
+        {
+            var newToken = auth.GenerateToken(updated);
+            response.Cookies.Append("auth_token", newToken, new CookieOptions
+            {
+                HttpOnly = true, Secure = false, SameSite = SameSiteMode.Strict,
+                Expires = DateTimeOffset.UtcNow.AddHours(8),
+            });
+        }
+        return Results.Ok(new { message = "Password changed." });
     }).RequireAuthorization();
 
 app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>

@@ -38,7 +38,9 @@ export function ChangePassword({ onChanged, forced = false }: ChangePasswordProp
       if (!res.ok) {
         setError(data.error ?? "Failed to change password.");
       } else {
+        // Reload page so the new JWT cookie (with force_pwd=false) is picked up
         onChanged();
+        setTimeout(() => window.location.href = "/", 100);
       }
     } catch {
       setError("Network error.");
