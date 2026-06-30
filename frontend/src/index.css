@@ -17,6 +17,13 @@
   /* shared chart greens so recharts fills track the brand */
   --chart-green: #23e57e;
   --chart-green-dim: #178f50;
+  /* Aliases — Assistant, Login, Users, and credential-banner sections were
+     authored against these names; map them to the canonical palette above so
+     those rules stop silently dropping to browser defaults. */
+  --border: var(--line);
+  --surface-1: var(--surface);
+  --surface-3: var(--surface-2);
+  --text-muted: var(--muted);
 }
 
 * { box-sizing: border-box; }
@@ -298,6 +305,42 @@ table.data tr:last-child td { border-bottom: none; }
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
+
+.assistant-input {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: .6rem .75rem;
+  font-size: .9rem;
+  font-family: var(--sans);
+  line-height: 1.4;
+  resize: none;             /* kills the native resize-handle artifact */
+  min-height: 2.6rem;
+}
+.assistant-input:focus { outline: none; border-color: var(--accent); }
+.assistant-input::placeholder { color: var(--muted); }
+.assistant-input:disabled { opacity: .55; cursor: not-allowed; }
+
+.assistant-send {
+  flex-shrink: 0;
+  align-self: stretch;
+  padding: .6rem 1.4rem;
+  border-radius: var(--radius);
+  font-size: .9rem;
+  font-family: var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  color: var(--text);
+}
+.btn-primary:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+.btn-primary:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── Users page fixes ────────────────────────────────────────────────────── */
 .page-content {
