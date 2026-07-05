@@ -1,17 +1,23 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense, lazy } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
-import { Dashboard } from "./components/Dashboard";
-import { Engagements } from "./components/Engagements";
-import { Connections } from "./components/Connections";
-import { Migration } from "./components/Migration";
-import { Logs } from "./components/Logs";
-import { Readiness } from "./components/Readiness";
-import { Assistant } from "./components/Assistant";
 import { Login, AuthUser } from "./components/Login";
 import { ChangePassword } from "./components/ChangePassword";
-import { Users } from "./components/Users";
 import "./index.css";
+
+// Authenticated route components are code-split: each loads on demand as its own chunk,
+// so the initial bundle no longer carries all 10 pages (Dashboard's charts, the Assistant's
+// streaming/markdown machinery, etc.). Login/ChangePassword stay eagerly imported above because
+// they render on the pre-auth critical path and must not flash a loader.
+// Named exports are mapped to the default export shape React.lazy expects.
+const Dashboard   = lazy(() => import("./components/Dashboard").then(m => ({ default: m.Dashboard })));
+const Engagements = lazy(() => import("./components/Engagements").then(m => ({ default: m.Engagements })));
+const Connections = lazy(() => import("./components/Connections").then(m => ({ default: m.Connections })));
+const Migration   = lazy(() => import("./components/Migration").then(m => ({ default: m.Migration })));
+const Logs        = lazy(() => import("./components/Logs").then(m => ({ default: m.Logs })));
+const Readiness   = lazy(() => import("./components/Readiness").then(m => ({ default: m.Readiness })));
+const Assistant   = lazy(() => import("./components/Assistant").then(m => ({ default: m.Assistant })));
+const Users       = lazy(() => import("./components/Users").then(m => ({ default: m.Users })));
 
 function Shell() {
   const [user, setUser]           = useState<AuthUser | null>(null);
@@ -84,20 +90,22 @@ function Shell() {
         </div>
       </aside>
       <main className="content">
-        <Routes>
-          <Route path="/"            element={<Dashboard />} />
-          <Route path="/readiness"   element={<Readiness />} />
-          <Route path="/setup"       element={<Readiness />} />
-          <Route path="/verify"      element={<Readiness />} />
-          <Route path="/engagements" element={<Engagements />} />
-          <Route path="/inventory"   element={<Connections />} />
-          <Route path="/connections" element={<Connections />} />
-          <Route path="/migrate"     element={<Migration />} />
-          <Route path="/logs"        element={<Logs />} />
-          <Route path="/assistant"   element={<Assistant />} />
-          {isAdmin && <Route path="/users" element={<Users />} />}
-          <Route path="*"            element={<Placeholder />} />
-        </Routes>
+        <Suspense fallback={<div className="panel"><p className="muted">Loading…</p></div>}>
+          <Routes>
+            <Route path="/"            element={<Dashboard />} />
+            <Route path="/readiness"   element={<Readiness />} />
+            <Route path="/setup"       element={<Readiness />} />
+            <Route path="/verify"      element={<Readiness />} />
+            <Route path="/engagements" element={<Engagements />} />
+            <Route path="/inventory"   element={<Connections />} />
+            <Route path="/connections" element={<Connections />} />
+            <Route path="/migrate"     element={<Migration />} />
+            <Route path="/logs"        element={<Logs />} />
+            <Route path="/assistant"   element={<Assistant />} />
+            {isAdmin && <Route path="/users" element={<Users />} />}
+            <Route path="*"            element={<Placeholder />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   );
