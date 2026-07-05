@@ -213,7 +213,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     // ---- per-type migration ----
 
     private async Task MigrateTextSecret(
-        PasConnector pas, SecretServerConnector ss, SourceItem si, long stagingId,
+        IPasClient pas, SecretServerConnector ss, SourceItem si, long stagingId,
         Dictionary<string, long> folderCache, MigrationRunInput input, Guid jobId, Guid eng, CancellationToken ct)
     {
         if (input.DryRun)
@@ -236,7 +236,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     }
 
     private async Task MigrateFileSecret(
-        PasConnector pas, SecretServerConnector ss, SourceItem si, long stagingId,
+        IPasClient pas, SecretServerConnector ss, SourceItem si, long stagingId,
         Dictionary<string, long> folderCache, MigrationRunInput input, Guid jobId, Guid eng, CancellationToken ct)
     {
         if (input.DryRun)
@@ -265,7 +265,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     }
 
     private async Task MigrateAccount(
-        PasConnector pas, SecretServerConnector ss, SourceItem si, long stagingId,
+        IPasClient pas, SecretServerConnector ss, SourceItem si, long stagingId,
         Dictionary<string, long> folderCache, MigrationRunInput input, Guid jobId, Guid eng,
         MigrationJobResult result, CancellationToken ct)
     {
