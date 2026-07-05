@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace PasMigration.Connectors;
 
@@ -278,12 +279,96 @@ public sealed class PasConnector : IPasClient
     /// Unmanage an account (write). Minimal body first; some versions need the full
     /// account object echoed back (open item) - caller can retry via UpdateAccountFullAsync.
     /// </summary>
+    /// <summary>
+    /// Unmanage an account. PAS <c>UpdateAccount</c> requires the FULL account object echoed back
+    /// (including the live <c>_STAMP</c> concurrency token), not a partial body — a minimal
+    /// <c>{ID, IsManaged=false}</c> is rejected with "Invalid arguments passed to the server" as
+    /// HTTP 200 + <c>success=false</c>. So this reads the full object via GetAllAccountInformation,
+    /// flips IsManaged, and posts the whole object back, mirroring what the PAS portal does.
+    ///
+    /// The full object (with _STAMP) is only available from GetAllAccountInformation — RedRock
+    /// <c>SELECT * FROM VaultAccount</c> does NOT include _STAMP.
+    /// </summary>
     public async Task UnmanageAccountAsync(string id, CancellationToken ct = default)
     {
+        // 1. Read the full account object (Result.VaultAccount.Row).
+        var row = await GetAccountFullAsync(id, ct);
+
+        // 2. Flip IsManaged; drop the internal _TableName marker to match the portal's write body.
+        row["IsManaged"] = false;
+        row.Remove("_TableName");
+
+        // 3. Post the whole object back.
         var req = NewAuthedRequest(HttpMethod.Post, "/ServerManage/UpdateAccount");
-        req.Content = JsonBody(new { ID = id, IsManaged = false });
+        req.Content = new StringContent(row.ToJsonString(JsonOpts), Encoding.UTF8, "application/json");
         using var resp = await _http.SendAsync(req, ct);
         resp.EnsureSuccessStatusCode();
+
+        // 4. PAS returns HTTP 200 + success=false for logical failures — status code is not enough.
+        var bodyText = await resp.Content.ReadAsStringAsync(ct);
+        using (var doc = JsonDocument.Parse(bodyText))
+        {
+            var root = doc.RootElement;
+            if (root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False)
+            {
+                var msg = root.TryGetProperty("Message", out var m) ? m.GetString() : null;
+                throw new InvalidOperationException(
+                    $"PAS unmanage failed for account {id}: {msg ?? "no message"}");
+            }
+        }
+
+        // 5. Verify the flip actually took effect — some shapes return OK without applying.
+        var check = await QueryAsync($"SELECT ID, IsManaged FROM VaultAccount WHERE ID='{id}'", ct);
+        if (check.Count > 0 && check[0].TryGetValue("IsManaged", out var im) && IsTruthy(im))
+            throw new InvalidOperationException(
+                $"PAS unmanage for account {id} reported success but IsManaged is still true.");
+    }
+
+    // RedRock may return IsManaged as a JSON bool, or (tenant-dependent) as a string/number.
+    // Treat any of true / "true" / "1" / 1 as still-managed so verification can't silently pass.
+    private static bool IsTruthy(object? v) => v switch
+    {
+        bool b   => b,
+        string s => s.Equals("true", StringComparison.OrdinalIgnoreCase) || s == "1",
+        long l   => l != 0,
+        double d => d != 0,
+        _        => false,
+    };
+
+    /// <summary>
+    /// Fetch the full account object from <c>/ServerManage/GetAllAccountInformation</c>. The account
+    /// object is nested at <c>Result.VaultAccount.Row</c> and includes the <c>_STAMP</c> concurrency
+    /// token required for a subsequent UpdateAccount write. Returns a mutable <see cref="JsonObject"/>.
+    /// Throws on <c>success=false</c> or a missing Row.
+    /// </summary>
+    private async Task<JsonObject> GetAccountFullAsync(string id, CancellationToken ct = default)
+    {
+        var req = NewAuthedRequest(HttpMethod.Post, "/ServerManage/GetAllAccountInformation");
+        req.Content = JsonBody(new { ID = id });
+        using var resp = await _http.SendAsync(req, ct);
+        resp.EnsureSuccessStatusCode();
+        var bodyText = await resp.Content.ReadAsStringAsync(ct);
+
+        var node = JsonNode.Parse(bodyText) as JsonObject
+            ?? throw new InvalidOperationException(
+                $"PAS GetAllAccountInformation for {id} returned a non-object body.");
+
+        if (node["success"] is JsonValue sv && sv.TryGetValue<bool>(out var ok) && !ok)
+        {
+            var msg = node["Message"]?.GetValue<string>();
+            throw new InvalidOperationException(
+                $"PAS GetAllAccountInformation refused for account {id}: {msg ?? "no message"}");
+        }
+
+        // The account object lives at Result.VaultAccount.Row — this exact path matters.
+        var rowNode = node["Result"]?["VaultAccount"]?["Row"] as JsonObject;
+        if (rowNode is null)
+            throw new InvalidOperationException(
+                $"PAS GetAllAccountInformation for {id} had no Result.VaultAccount.Row. Body: " +
+                (bodyText.Length > 300 ? bodyText[..300] : bodyText));
+
+        // Detach from the parent document so we can mutate and re-serialize it standalone.
+        return (JsonObject)rowNode.DeepClone();
     }
 
     private static StringContent JsonBody(object o) =>
