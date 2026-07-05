@@ -7,7 +7,7 @@ namespace PasMigration.Connectors;
 /// Manages tenant_connection rows (metadata only) and runs the live auth handshake.
 /// Credentials are accepted per request, used in memory, and never persisted or logged.
 /// </summary>
-public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpFactory, IPasConnectorFactory pasFactory)
+public sealed class ConnectionService(IDbConnection db, IPasConnectorFactory pasFactory, ISecretServerConnectorFactory ssFactory)
 {
     /// <summary>Create or update the source/target connection metadata for an engagement.</summary>
     public async Task<Guid> UpsertAsync(Guid engagementId, ConnectionInput input)
@@ -48,7 +48,6 @@ public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpF
     /// </summary>
     public async Task<TestConnectionResult> TestAsync(TestConnectionInput input, CancellationToken ct)
     {
-        var http = httpFactory.CreateClient("tenant");
         using var creds = new TenantCredentials
         {
             ClientId = input.ClientId,
@@ -69,8 +68,7 @@ public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpF
             }
             else // secret_server
             {
-                var ss = new SecretServerConnector(
-                    http,
+                var ss = ssFactory.Create(
                     input.PlatformBaseUrl ?? input.BaseUrl!,
                     input.SecretServerBaseUrl ?? input.BaseUrl!,
                     input.AuthMode == "legacy_password"
@@ -95,13 +93,11 @@ public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpF
     /// <summary>Authenticate to Secret Server and return its templates for the UI picker.</summary>
     public async Task<List<TemplateOption>> ListTemplatesAsync(TestConnectionInput input, CancellationToken ct)
     {
-        var http = httpFactory.CreateClient("tenant");
         using var creds = new TenantCredentials
         {
             ClientId = input.ClientId, ClientSecret = input.ClientSecret, Scope = input.Scope,
         };
-        var ss = new SecretServerConnector(
-            http,
+        var ss = ssFactory.Create(
             input.PlatformBaseUrl ?? input.BaseUrl!,
             input.SecretServerBaseUrl ?? input.BaseUrl!,
             input.AuthMode == "legacy_password"
@@ -120,13 +116,11 @@ public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpF
     public async Task<TemplateOption> CreateFileTemplateAsync(
         TestConnectionInput input, string name, CancellationToken ct)
     {
-        var http = httpFactory.CreateClient("tenant");
         using var creds = new TenantCredentials
         {
             ClientId = input.ClientId, ClientSecret = input.ClientSecret, Scope = input.Scope,
         };
-        var ss = new SecretServerConnector(
-            http,
+        var ss = ssFactory.Create(
             input.PlatformBaseUrl ?? input.BaseUrl!,
             input.SecretServerBaseUrl ?? input.BaseUrl!,
             input.AuthMode == "legacy_password"

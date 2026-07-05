@@ -13,7 +13,7 @@ namespace PasMigration.Connectors;
 /// (https://{tenant}.secretservercloud.com/api/v1/...). So for platform/migrated tenants we
 /// acquire a platform token once and reuse it for SS resource calls.
 /// </summary>
-public sealed class SecretServerConnector
+public sealed class SecretServerConnector : ISecretServerClient
 {
     private readonly HttpClient _http;
     private readonly string _platformBaseUrl;     // https://{tenant}.delinea.app

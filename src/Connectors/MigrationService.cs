@@ -12,7 +12,7 @@ namespace PasMigration.Connectors;
 /// Security: secret values/passwords/file bytes flow through memory only - never persisted
 /// to our DB, never logged. Only metadata, status, and outcomes are stored.
 /// </summary>
-public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFactory, JobRegistry jobs, IPasConnectorFactory pasFactory)
+public sealed class MigrationService(IDbConnection db, JobRegistry jobs, IPasConnectorFactory pasFactory, ISecretServerConnectorFactory ssFactory)
 {
     /// <summary>
     /// Run a migration job for one item type (or full). Credentials are passed in-memory.
@@ -21,7 +21,6 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     public async Task<MigrationJobResult> RunAsync(
         Guid engagementId, MigrationRunInput input, CancellationToken ct)
     {
-        var http = httpFactory.CreateClient("tenant");
         await OpenAsync(ct);
 
         // Create the job row.
@@ -48,8 +47,8 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
                 { ClientId = input.PasClientId, ClientSecret = input.PasClientSecret, Scope = input.PasScope })
                 await pas.AuthenticateAsync(pcreds, ct);
 
-            var ss = new SecretServerConnector(
-                http, input.SsPlatformBaseUrl ?? input.SsBaseUrl!, input.SsSecretServerBaseUrl ?? input.SsBaseUrl!,
+            var ss = ssFactory.Create(
+                input.SsPlatformBaseUrl ?? input.SsBaseUrl!, input.SsSecretServerBaseUrl ?? input.SsBaseUrl!,
                 SecretServerConnector.AuthMode.PlatformClientCredentials);
             using (var screds = new TenantCredentials
                 { ClientId = input.SsClientId, ClientSecret = input.SsClientSecret })
@@ -213,7 +212,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     // ---- per-type migration ----
 
     private async Task MigrateTextSecret(
-        IPasClient pas, SecretServerConnector ss, SourceItem si, long stagingId,
+        IPasClient pas, ISecretServerClient ss, SourceItem si, long stagingId,
         Dictionary<string, long> folderCache, MigrationRunInput input, Guid jobId, Guid eng, CancellationToken ct)
     {
         if (input.DryRun)
@@ -236,7 +235,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     }
 
     private async Task MigrateFileSecret(
-        IPasClient pas, SecretServerConnector ss, SourceItem si, long stagingId,
+        IPasClient pas, ISecretServerClient ss, SourceItem si, long stagingId,
         Dictionary<string, long> folderCache, MigrationRunInput input, Guid jobId, Guid eng, CancellationToken ct)
     {
         if (input.DryRun)
@@ -265,7 +264,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     }
 
     private async Task MigrateAccount(
-        IPasClient pas, SecretServerConnector ss, SourceItem si, long stagingId,
+        IPasClient pas, ISecretServerClient ss, SourceItem si, long stagingId,
         Dictionary<string, long> folderCache, MigrationRunInput input, Guid jobId, Guid eng,
         MigrationJobResult result, CancellationToken ct)
     {
@@ -395,10 +394,9 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     /// </summary>
     public async Task<RevertResult> RevertAsync(Guid engagementId, MigrationRunInput conn, CancellationToken ct)
     {
-        var http = httpFactory.CreateClient("tenant");
         await OpenAsync(ct);
-        var ss = new SecretServerConnector(
-            http, conn.SsPlatformBaseUrl ?? conn.SsBaseUrl!, conn.SsSecretServerBaseUrl ?? conn.SsBaseUrl!,
+        var ss = ssFactory.Create(
+                conn.SsPlatformBaseUrl ?? conn.SsBaseUrl!, conn.SsSecretServerBaseUrl ?? conn.SsBaseUrl!,
             SecretServerConnector.AuthMode.PlatformClientCredentials);
         using (var screds = new TenantCredentials { ClientId = conn.SsClientId, ClientSecret = conn.SsClientSecret })
             await ss.AuthenticatePlatformAsync(screds, ct);
@@ -452,7 +450,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     /// the running-path keys built in EnsureFolderPath: slash-joined, relative to staging).
     /// </summary>
     private static async Task PreloadFolderCache(
-        SecretServerConnector ss, long stagingId, Dictionary<string, long> cache, CancellationToken ct)
+        ISecretServerClient ss, long stagingId, Dictionary<string, long> cache, CancellationToken ct)
     {
         var all = await ss.ListAllFoldersAsync(ct);
         // Index by parent for a downward walk from staging.
@@ -476,7 +474,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
     }
 
     private async Task<long> EnsureFolderPath(
-        SecretServerConnector ss, long stagingId, string? sourcePath,
+        ISecretServerClient ss, long stagingId, string? sourcePath,
         Dictionary<string, long> cache, CancellationToken ct)
     {
         // Mirror the source path under staging. Leaf-only paths create one level; deeper

@@ -9,7 +9,7 @@ namespace PasMigration.Connectors;
 /// inventory_snapshot + inventory_item rows. Also builds the source/target
 /// reconciliation diff. No secret values are read or stored - metadata only.
 /// </summary>
-public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFactory, IPasConnectorFactory pasFactory)
+public sealed class InventoryService(IDbConnection db, IPasConnectorFactory pasFactory, ISecretServerConnectorFactory ssFactory)
 {
     /// <summary>
     /// Capture a full inventory for one tenant connection using session credentials.
@@ -18,8 +18,6 @@ public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFa
     public async Task<InventoryRunResult> CaptureAsync(
         Guid engagementId, RunInventoryInput input, CancellationToken ct)
     {
-        var http = httpFactory.CreateClient("tenant");
-
         // Resolve (or create) the tenant_connection row for this role.
         var connId = await db.ExecuteScalarAsync<Guid>(
             @"INSERT INTO tenant_connection
@@ -43,7 +41,7 @@ public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFa
         if (input.SystemType == "pas")
             items = await CapturePasAsync(pasFactory, input, ct);
         else
-            items = await CaptureSecretServerAsync(http, input, ct);
+            items = await CaptureSecretServerAsync(ssFactory, input, ct);
 
         // Summary counts for the snapshot.
         var summary = new
@@ -216,10 +214,9 @@ public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFa
 
     // ---- Secret Server capture ----
     private static async Task<List<InvItem>> CaptureSecretServerAsync(
-        HttpClient http, RunInventoryInput input, CancellationToken ct)
+        ISecretServerConnectorFactory ssFactory, RunInventoryInput input, CancellationToken ct)
     {
-        var ss = new SecretServerConnector(
-            http,
+        var ss = ssFactory.Create(
             input.PlatformBaseUrl ?? input.BaseUrl!,
             input.SecretServerBaseUrl ?? input.BaseUrl!,
             input.AuthMode == "legacy_password"

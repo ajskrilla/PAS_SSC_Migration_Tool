@@ -35,6 +35,7 @@ builder.Services.AddScoped<PasMigration.Data.IInventoryRepository, PasMigration.
 builder.Services.AddScoped<PasMigration.Data.IMigrationRepository, PasMigration.Data.MigrationRepository>();
 // Connector factories (own HttpClient creation; make services testable with fake clients).
 builder.Services.AddSingleton<PasMigration.Connectors.IPasConnectorFactory, PasMigration.Connectors.PasConnectorFactory>();
+builder.Services.AddSingleton<PasMigration.Connectors.ISecretServerConnectorFactory, PasMigration.Connectors.SecretServerConnectorFactory>();
 // Session credential store: in-memory, 60-min sliding idle, cleared on restart.
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Encrypts credentials for persistence across restarts.
