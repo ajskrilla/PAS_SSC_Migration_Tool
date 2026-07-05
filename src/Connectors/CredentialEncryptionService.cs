@@ -1,10 +1,9 @@
-using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Dapper;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using PasMigration.Data;
 
 namespace PasMigration.Connectors;
 
@@ -16,8 +15,14 @@ namespace PasMigration.Connectors;
 /// Security posture: the encryption key is derived from AUTH_JWT_SECRET (which must be set
 /// in the environment). If the secret changes, stored credentials can no longer be decrypted
 /// and the operator must re-enter them on the Pre-migration page.
+///
+/// Layering note (DAL): all SQL now lives in <see cref="ICredentialRepository"/>. This service
+/// keeps the cryptography (HKDF key derivation, AES-256-GCM encrypt/decrypt) and the save/load
+/// orchestration, delegating persistence to the repository. The cryptographic behavior is
+/// unchanged from the pre-DAL version.
 /// </summary>
 public sealed class CredentialEncryptionService(
+    ICredentialRepository credentials,
     IConfiguration cfg,
     ILogger<CredentialEncryptionService> log)
 {
@@ -95,54 +100,33 @@ public sealed class CredentialEncryptionService(
 
     // ── Persist to DB ─────────────────────────────────────────────────────────────────
 
-    public async Task SaveAsync(IDbConnection db, Guid tenantConnectionId, Guid engagementId,
-                                 SessionCredentials creds)
+    public async Task SaveAsync(Guid tenantConnectionId, Guid engagementId,
+                                 SessionCredentials creds, CancellationToken ct = default)
     {
         var ciphertext = Encrypt(engagementId, creds);
-
-        // Upsert — one row per tenant_connection
-        await db.ExecuteAsync(
-            @"INSERT INTO encrypted_credential (id, tenant_connection_id, kms_key_id, ciphertext)
-              VALUES (uuid_generate_v4(), @tcid, @kms, @ct)
-              ON CONFLICT (tenant_connection_id)
-              DO UPDATE SET ciphertext=@ct, created_at=now()",
-            new { tcid = tenantConnectionId, kms = KmsKeyId, ct = ciphertext });
-
+        await credentials.UpsertCiphertextAsync(tenantConnectionId, KmsKeyId, ciphertext, ct);
         log.LogInformation("Credentials encrypted and persisted for connection {Id}", tenantConnectionId);
     }
 
     // ── Load from DB into vault ────────────────────────────────────────────────────────
 
-    public async Task LoadIntoVaultAsync(IDbConnection db, Guid engagementId, CredentialVault vault)
+    public async Task LoadIntoVaultAsync(Guid engagementId, CredentialVault vault, CancellationToken ct = default)
     {
-        var rows = await db.QueryAsync(
-            @"SELECT tc.role, ec.ciphertext
-              FROM encrypted_credential ec
-              JOIN tenant_connection tc ON tc.id = ec.tenant_connection_id
-              WHERE tc.engagement_id = @id",
-            new { id = engagementId });
+        var blobs = await credentials.GetBlobsByEngagementAsync(engagementId, ct);
 
-        foreach (var row in rows.Cast<IDictionary<string, object?>>())
+        foreach (var stored in blobs)
         {
-            var role  = row["role"]?.ToString() ?? "";
-            var blob  = row["ciphertext"] as byte[];
-            if (blob is null) continue;
-
-            var creds = Decrypt(engagementId, blob);
+            var creds = Decrypt(engagementId, stored.Ciphertext);
             if (creds is not null)
             {
-                vault.Put(engagementId, role, creds);
-                log.LogDebug("Loaded persisted credentials for {Role}", role);
+                vault.Put(engagementId, stored.Role, creds);
+                log.LogDebug("Loaded persisted credentials for {Role}", stored.Role);
             }
         }
     }
 
     // ── Delete (e.g. when connection is removed) ──────────────────────────────────────
 
-    public async Task DeleteAsync(IDbConnection db, Guid tenantConnectionId)
-    {
-        await db.ExecuteAsync(
-            "DELETE FROM encrypted_credential WHERE tenant_connection_id = @id",
-            new { id = tenantConnectionId });
-    }
+    public async Task DeleteAsync(Guid tenantConnectionId, CancellationToken ct = default) =>
+        await credentials.DeleteByConnectionAsync(tenantConnectionId, ct);
 }
