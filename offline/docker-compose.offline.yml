@@ -1,0 +1,42 @@
+# docker-compose.offline.yml
+#
+# Overlay for AIR-GAPPED installs. Use WITH the base file, and always with plain `up -d`
+# (never `--build`):
+#   docker compose -f docker-compose.yml -f docker-compose.offline.yml up -d
+#
+# What it changes for offline operation:
+#   1. Neutralizes `ollama-init` — in the base file that service runs `ollama pull` (needs
+#      internet). Here its command is a no-op: the models are already baked into the ollama
+#      volume by install-offline.sh, so there is nothing to pull. It starts, prints a note,
+#      and exits 0.
+#   2. Pins `api` and `frontend` to the prebuilt image tags loaded from the bundle. Combined
+#      with using `up -d` (NOT `up --build`), compose reuses the loaded images and never
+#      builds — so the air-gapped host needs no .NET SDK, NuGet, Node, or npm.
+#   3. Pins the model env to the baked models.
+#
+# Portability note: this override intentionally avoids version-sensitive constructs
+# (no `!reset`, no `deploy.replicas`) so it works on any Docker Compose v2.
+#
+# Everything else (ports, volumes, healthchecks, restart policy) is inherited from the base.
+
+name: pas-migration
+
+services:
+  # Neutralize the one-shot model puller: no network, just a message, then exit.
+  ollama-init:
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'echo "offline bundle: models are pre-baked into the ollama volume; skipping pull."; exit 0'
+    restart: "no"
+
+  api:
+    # Prebuilt image loaded from the bundle. With `up -d` (no --build), compose reuses it
+    # and does not rebuild, so `build:` in the base file is never triggered.
+    image: pas-migration-api
+    environment:
+      # Match the baked models (overrides the template default).
+      Ai__Ollama__ChatModel: ${OLLAMA_CHAT_MODEL:-qwen2.5:3b}
+      Ai__Ollama__EmbedModel: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+
+  frontend:
+    image: pas-migration-frontend
