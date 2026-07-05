@@ -7,7 +7,7 @@ namespace PasMigration.Connectors;
 /// Manages tenant_connection rows (metadata only) and runs the live auth handshake.
 /// Credentials are accepted per request, used in memory, and never persisted or logged.
 /// </summary>
-public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpFactory)
+public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpFactory, IPasConnectorFactory pasFactory)
 {
     /// <summary>Create or update the source/target connection metadata for an engagement.</summary>
     public async Task<Guid> UpsertAsync(Guid engagementId, ConnectionInput input)
@@ -60,7 +60,7 @@ public sealed class ConnectionService(IDbConnection db, IHttpClientFactory httpF
         {
             if (input.SystemType == "pas")
             {
-                var pas = new PasConnector(http, input.BaseUrl!, input.AppId!);
+                var pas = pasFactory.Create(input.BaseUrl!, input.AppId!);
                 await pas.AuthenticateAsync(creds, ct);
                 // Tiny read probe: confirms the token authorizes RedRock. Count only - no data leaves.
                 var rows = await pas.QueryAsync("SELECT COUNT(*) AS n FROM VaultAccount", ct);

@@ -9,7 +9,7 @@ namespace PasMigration.Connectors;
 /// inventory_snapshot + inventory_item rows. Also builds the source/target
 /// reconciliation diff. No secret values are read or stored - metadata only.
 /// </summary>
-public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFactory)
+public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFactory, IPasConnectorFactory pasFactory)
 {
     /// <summary>
     /// Capture a full inventory for one tenant connection using session credentials.
@@ -41,7 +41,7 @@ public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFa
 
         var items = new List<InvItem>();
         if (input.SystemType == "pas")
-            items = await CapturePasAsync(http, input, ct);
+            items = await CapturePasAsync(pasFactory, input, ct);
         else
             items = await CaptureSecretServerAsync(http, input, ct);
 
@@ -121,9 +121,9 @@ public sealed class InventoryService(IDbConnection db, IHttpClientFactory httpFa
 
     // ---- PAS capture ----
     private static async Task<List<InvItem>> CapturePasAsync(
-        HttpClient http, RunInventoryInput input, CancellationToken ct)
+        IPasConnectorFactory pasFactory, RunInventoryInput input, CancellationToken ct)
     {
-        var pas = new PasConnector(http, input.BaseUrl!, input.AppId!);
+        var pas = pasFactory.Create(input.BaseUrl!, input.AppId!);
         using var creds = new TenantCredentials
             { ClientId = input.ClientId, ClientSecret = input.ClientSecret, Scope = input.Scope };
         await pas.AuthenticateAsync(creds, ct);

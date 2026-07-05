@@ -12,7 +12,7 @@ namespace PasMigration.Connectors;
 /// Security: secret material returned by retrieval methods stays in memory and is the
 /// caller's responsibility to handle per the security model. Tokens are never logged.
 /// </summary>
-public sealed class PasConnector
+public sealed class PasConnector : IPasClient
 {
     private readonly HttpClient _http;
     private readonly string _tenantBaseUrl; // e.g. https://acme.my.centrify.net

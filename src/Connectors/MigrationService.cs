@@ -12,7 +12,7 @@ namespace PasMigration.Connectors;
 /// Security: secret values/passwords/file bytes flow through memory only - never persisted
 /// to our DB, never logged. Only metadata, status, and outcomes are stored.
 /// </summary>
-public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFactory, JobRegistry jobs)
+public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFactory, JobRegistry jobs, IPasConnectorFactory pasFactory)
 {
     /// <summary>
     /// Run a migration job for one item type (or full). Credentials are passed in-memory.
@@ -43,7 +43,7 @@ public sealed class MigrationService(IDbConnection db, IHttpClientFactory httpFa
         try
         {
             // Connect to both tenants.
-            var pas = new PasConnector(http, input.PasBaseUrl!, input.PasAppId!);
+            var pas = pasFactory.Create(input.PasBaseUrl!, input.PasAppId!);
             using (var pcreds = new TenantCredentials
                 { ClientId = input.PasClientId, ClientSecret = input.PasClientSecret, Scope = input.PasScope })
                 await pas.AuthenticateAsync(pcreds, ct);
