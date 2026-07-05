@@ -31,6 +31,7 @@ builder.Services.AddScoped<MigrationService>();
 builder.Services.AddScoped<PasMigration.Data.IEngagementRepository, PasMigration.Data.EngagementRepository>();
 builder.Services.AddScoped<PasMigration.Data.IUserRepository, PasMigration.Data.UserRepository>();
 builder.Services.AddScoped<PasMigration.Data.ICredentialRepository, PasMigration.Data.CredentialRepository>();
+builder.Services.AddScoped<PasMigration.Data.IInventoryRepository, PasMigration.Data.InventoryRepository>();
 // Session credential store: in-memory, 60-min sliding idle, cleared on restart.
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Encrypts credentials for persistence across restarts.
@@ -231,16 +232,9 @@ app.MapPost("/api/engagements/{id:guid}/reconcile",
 
 // Latest snapshot summaries per role (for dashboard cards).
 app.MapGet("/api/engagements/{id:guid}/inventory/summary",
-    async (Guid id, IDbConnection db) =>
+    async (Guid id, PasMigration.Data.IInventoryRepository inventory, CancellationToken ct) =>
     {
-        var rows = await db.QueryAsync(
-            @"SELECT DISTINCT ON (tc.role) tc.role, s.id AS snapshot_id, s.captured_at,
-                     s.summary::text AS summary_json
-              FROM inventory_snapshot s
-              JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
-              WHERE s.engagement_id = @id
-              ORDER BY tc.role, s.captured_at DESC",
-            new { id });
+        var rows = await inventory.GetLatestSnapshotSummariesAsync(id, ct);
 
         // Parse the JSONB (returned as text) into a real object so the client gets numbers.
         var shaped = rows.Select(r =>
@@ -264,22 +258,13 @@ app.MapGet("/api/engagements/{id:guid}/inventory/summary",
 
 // Inventory items for a snapshot (drill-down table).
 app.MapGet("/api/snapshots/{snapshotId:guid}/items",
-    async (Guid snapshotId, IDbConnection db, string? type) =>
-    {
-        var sql = @"SELECT item_type, source_native_id, name, folder_path, is_managed, size_bytes
-                    FROM inventory_item WHERE snapshot_id = @snapshotId"
-                  + (type is null ? "" : " AND item_type = @type")
-                  + " ORDER BY item_type, name";
-        return Results.Ok(await db.QueryAsync(sql, new { snapshotId, type }));
-    });
+    async (Guid snapshotId, PasMigration.Data.IInventoryRepository inventory, string? type, CancellationToken ct) =>
+        Results.Ok(await inventory.GetSnapshotItemsAsync(snapshotId, type, ct)));
 
 // Reconciliation results (diff table).
 app.MapGet("/api/engagements/{id:guid}/reconciliation",
-    async (Guid id, IDbConnection db) =>
-        Results.Ok(await db.QueryAsync(
-            @"SELECT item_type, match_key, match_status FROM reconciliation_result
-              WHERE engagement_id = @id ORDER BY match_status, item_type",
-            new { id })));
+    async (Guid id, PasMigration.Data.IInventoryRepository inventory, CancellationToken ct) =>
+        Results.Ok(await inventory.GetReconciliationAsync(id, ct)));
 
 // ---- Migration (write; dry-run aware) ----
 
