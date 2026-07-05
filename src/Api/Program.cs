@@ -32,6 +32,7 @@ builder.Services.AddScoped<PasMigration.Data.IEngagementRepository, PasMigration
 builder.Services.AddScoped<PasMigration.Data.IUserRepository, PasMigration.Data.UserRepository>();
 builder.Services.AddScoped<PasMigration.Data.ICredentialRepository, PasMigration.Data.CredentialRepository>();
 builder.Services.AddScoped<PasMigration.Data.IInventoryRepository, PasMigration.Data.InventoryRepository>();
+builder.Services.AddScoped<PasMigration.Data.IMigrationRepository, PasMigration.Data.MigrationRepository>();
 // Session credential store: in-memory, 60-min sliding idle, cleared on restart.
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Encrypts credentials for persistence across restarts.
@@ -349,14 +350,10 @@ app.MapPost("/api/engagements/{id:guid}/revert",
 
 // Migration report: jobs + per-item outcomes + event timeline.
 app.MapGet("/api/engagements/{id:guid}/migration/report",
-    async (Guid id, IDbConnection db) =>
+    async (Guid id, PasMigration.Data.IMigrationRepository migrations, CancellationToken ct) =>
     {
-        var jobs = await db.QueryAsync(
-            @"SELECT id, job_type, mode, status, started_at, finished_at, total, succeeded, failed, skipped
-              FROM migration_job WHERE engagement_id=@id ORDER BY started_at DESC", new { id });
-        var items = await db.QueryAsync(
-            @"SELECT item_type, source_name, source_folder_path, target_native_id, status, last_error
-              FROM migration_item WHERE engagement_id=@id ORDER BY item_type, source_name", new { id });
+        var jobs  = await migrations.GetJobsAsync(id, ct);
+        var items = await migrations.GetReportItemsAsync(id, ct);
         return Results.Ok(new { jobs, items });
     });
 
@@ -432,59 +429,28 @@ app.MapGet("/api/engagements/{id:guid}/metrics",
     });
 
 app.MapGet("/api/engagements/{id:guid}/source-items",
-    async (Guid id, IDbConnection db, string? type, string? scope) =>
-    {
-        var sql = @"SELECT ii.item_type, ii.source_native_id, ii.name, ii.folder_path, ii.is_managed,
-                           COALESCE(mi.status, 'pending') AS migration_status,
-                           mi.target_native_id IS NOT NULL AS is_migrated
-                    FROM inventory_item ii
-                    JOIN inventory_snapshot s ON s.id = ii.snapshot_id
-                    JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
-                    LEFT JOIN migration_item mi
-                           ON mi.engagement_id = @id
-                          AND mi.item_type = ii.item_type
-                          AND mi.source_native_id = ii.source_native_id
-                    WHERE s.engagement_id=@id AND tc.role='source'
-                      AND s.captured_at = (
-                        SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
-                        JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
-                        WHERE s2.engagement_id=@id AND tc2.role='source')"
-                  + (type is null ? "" : " AND ii.item_type=@type")
-                  + (scope is null ? "" : " AND ii.attributes->>'AccountScope' = @scope")
-                  + @" ORDER BY
-                        CASE WHEN COALESCE(mi.status,'pending') IN ('succeeded','migrated')
-                             THEN 1 ELSE 0 END,
-                        ii.item_type, ii.name";
-        return Results.Ok(await db.QueryAsync(sql, new { id, type, scope }));
-    });
+    async (Guid id, PasMigration.Data.IMigrationRepository migrations, string? type, string? scope, CancellationToken ct) =>
+        Results.Ok(await migrations.GetSourceItemsAsync(id, type, scope, ct)));
 
 // Event log (audit + diagnostics): every tenant action with outcome and message.
 // Migration delta/status: how many of each item type are migrated vs pending vs failed.
 // Compares the latest source inventory against migration_item progress.
 app.MapGet("/api/engagements/{id:guid}/logs",
-    async (Guid id, IDbConnection db, int? limit, int? offset) =>
+    async (Guid id, PasMigration.Data.IMigrationRepository migrations, int? limit, int? offset, CancellationToken ct) =>
     {
         var lim = limit is > 0 and <= 200 ? limit!.Value : 50;
         var off = offset is > 0 ? offset!.Value : 0;
-        var total = await db.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM event_log WHERE engagement_id=@id", new { id });
-        var rows = await db.QueryAsync(
-            @"SELECT occurred_at, event_type, action, outcome, message, tenant_role
-              FROM event_log WHERE engagement_id=@id
-              ORDER BY occurred_at DESC LIMIT @lim OFFSET @off",
-            new { id, lim, off });
+        var total = await migrations.CountEventsAsync(id, ct);
+        var rows  = await migrations.GetEventsAsync(id, lim, off, ct);
         return Results.Ok(new { total, limit = lim, offset = off, rows });
     });
 
 // The currently-running job for an engagement (so the UI can offer an abort button
 // even though the migrate request is still in flight).
 app.MapGet("/api/engagements/{id:guid}/running-job",
-    async (Guid id, IDbConnection db) =>
+    async (Guid id, PasMigration.Data.IMigrationRepository migrations, CancellationToken ct) =>
     {
-        var job = await db.QueryFirstOrDefaultAsync(
-            @"SELECT id, job_type, mode, started_at FROM migration_job
-              WHERE engagement_id=@id AND status='running' ORDER BY started_at DESC LIMIT 1",
-            new { id });
+        var job = await migrations.GetRunningJobAsync(id, ct);
         return Results.Ok(job is null ? new { running = false } : new { running = true, job });
     });
 
@@ -497,22 +463,10 @@ app.MapPost("/api/jobs/{jobId:guid}/cancel",
 
 // Migration delta: per-type counts of what's migrated vs pending, plus the item list.
 app.MapGet("/api/engagements/{id:guid}/migration-status",
-    async (Guid id, IDbConnection db) =>
+    async (Guid id, PasMigration.Data.IMigrationRepository migrations, CancellationToken ct) =>
     {
-        var summary = await db.QueryAsync(
-            @"SELECT item_type,
-                     COUNT(*) AS total,
-                     COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated,
-                     COUNT(*) FILTER (WHERE status='failed') AS failed,
-                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','failed') AND target_native_id IS NULL) AS pending
-              FROM migration_item WHERE engagement_id=@id
-              GROUP BY item_type ORDER BY item_type",
-            new { id });
-        var items = await db.QueryAsync(
-            @"SELECT item_type, name, source_native_id, target_native_id, status
-              FROM migration_item WHERE engagement_id=@id
-              ORDER BY item_type, name LIMIT 1000",
-            new { id });
+        var summary = await migrations.GetStatusSummaryAsync(id, ct);
+        var items   = await migrations.GetStatusItemsAsync(id, ct);
         return Results.Ok(new { summary, items });
     });
 

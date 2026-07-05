@@ -1,0 +1,124 @@
+using System.Data;
+using Dapper;
+
+namespace PasMigration.Data;
+
+/// <summary>
+/// Data-access seam for migration-domain reads: the <c>migration_job</c>, <c>migration_item</c>,
+/// and <c>event_log</c> tables, plus the source-inventory-vs-migration join that drives the
+/// migration checklist. The only place this SQL lives.
+///
+/// All methods return Dapper dynamic rows, preserving the exact snake_case shape the SPA consumes
+/// (Logs table, migration checklist, report/status views). Input validation (e.g. clamping page
+/// size) stays at the transport boundary; the repository trusts the values it is handed.
+///
+/// Note: the heavier Overview <c>/metrics</c> queries (4 multi-CTE aggregates) are added to this
+/// same interface in a separate step (4c), isolated so that high-risk change deploys on its own.
+/// </summary>
+public interface IMigrationRepository
+{
+    /// <summary>Jobs for an engagement, newest first (migration report).</summary>
+    Task<IEnumerable<dynamic>> GetJobsAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>All migration items for an engagement (migration report).</summary>
+    Task<IEnumerable<dynamic>> GetReportItemsAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Source-snapshot items joined to migration progress, for the checklist. Optional filters by
+    /// item type and account scope. Migrated items sort to the bottom.
+    /// </summary>
+    Task<IEnumerable<dynamic>> GetSourceItemsAsync(Guid engagementId, string? type, string? scope, CancellationToken ct = default);
+
+    /// <summary>Total event_log count for an engagement (pagination).</summary>
+    Task<long> CountEventsAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>A page of event_log rows, newest first. Caller supplies validated limit/offset.</summary>
+    Task<IEnumerable<dynamic>> GetEventsAsync(Guid engagementId, int limit, int offset, CancellationToken ct = default);
+
+    /// <summary>The most recent running job for an engagement, or null if none is running.</summary>
+    Task<dynamic?> GetRunningJobAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>Per-item-type migrated/failed/pending delta summary.</summary>
+    Task<IEnumerable<dynamic>> GetStatusSummaryAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>Migration items for the status view (capped at 1000).</summary>
+    Task<IEnumerable<dynamic>> GetStatusItemsAsync(Guid engagementId, CancellationToken ct = default);
+}
+
+public sealed class MigrationRepository(IDbConnection db) : IMigrationRepository
+{
+    public async Task<IEnumerable<dynamic>> GetJobsAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            @"SELECT id, job_type, mode, status, started_at, finished_at, total, succeeded, failed, skipped
+              FROM migration_job WHERE engagement_id=@id ORDER BY started_at DESC",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetReportItemsAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            @"SELECT item_type, source_name, source_folder_path, target_native_id, status, last_error
+              FROM migration_item WHERE engagement_id=@id ORDER BY item_type, source_name",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetSourceItemsAsync(
+        Guid engagementId, string? type, string? scope, CancellationToken ct = default)
+    {
+        var sql = @"SELECT ii.item_type, ii.source_native_id, ii.name, ii.folder_path, ii.is_managed,
+                           COALESCE(mi.status, 'pending') AS migration_status,
+                           mi.target_native_id IS NOT NULL AS is_migrated
+                    FROM inventory_item ii
+                    JOIN inventory_snapshot s ON s.id = ii.snapshot_id
+                    JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+                    LEFT JOIN migration_item mi
+                           ON mi.engagement_id = @id
+                          AND mi.item_type = ii.item_type
+                          AND mi.source_native_id = ii.source_native_id
+                    WHERE s.engagement_id=@id AND tc.role='source'
+                      AND s.captured_at = (
+                        SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                        JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+                        WHERE s2.engagement_id=@id AND tc2.role='source')"
+                  + (type is null ? "" : " AND ii.item_type=@type")
+                  + (scope is null ? "" : " AND ii.attributes->>'AccountScope' = @scope")
+                  + @" ORDER BY
+                        CASE WHEN COALESCE(mi.status,'pending') IN ('succeeded','migrated')
+                             THEN 1 ELSE 0 END,
+                        ii.item_type, ii.name";
+        return await db.QueryAsync(new CommandDefinition(sql, new { id = engagementId, type, scope }, cancellationToken: ct));
+    }
+
+    public async Task<long> CountEventsAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.ExecuteScalarAsync<long>(new CommandDefinition(
+            "SELECT COUNT(*) FROM event_log WHERE engagement_id=@id",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetEventsAsync(Guid engagementId, int limit, int offset, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            @"SELECT occurred_at, event_type, action, outcome, message, tenant_role
+              FROM event_log WHERE engagement_id=@id
+              ORDER BY occurred_at DESC LIMIT @lim OFFSET @off",
+            new { id = engagementId, lim = limit, off = offset }, cancellationToken: ct));
+
+    public async Task<dynamic?> GetRunningJobAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryFirstOrDefaultAsync(new CommandDefinition(
+            @"SELECT id, job_type, mode, started_at FROM migration_job
+              WHERE engagement_id=@id AND status='running' ORDER BY started_at DESC LIMIT 1",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetStatusSummaryAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            @"SELECT item_type,
+                     COUNT(*) AS total,
+                     COUNT(*) FILTER (WHERE status='migrated' OR target_native_id IS NOT NULL) AS migrated,
+                     COUNT(*) FILTER (WHERE status='failed') AS failed,
+                     COUNT(*) FILTER (WHERE status NOT IN ('migrated','failed') AND target_native_id IS NULL) AS pending
+              FROM migration_item WHERE engagement_id=@id
+              GROUP BY item_type ORDER BY item_type",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetStatusItemsAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            @"SELECT item_type, name, source_native_id, target_native_id, status
+              FROM migration_item WHERE engagement_id=@id
+              ORDER BY item_type, name LIMIT 1000",
+            new { id = engagementId }, cancellationToken: ct));
+}
