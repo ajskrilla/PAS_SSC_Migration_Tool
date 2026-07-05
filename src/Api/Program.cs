@@ -29,6 +29,7 @@ builder.Services.AddScoped<InventoryService>();
 builder.Services.AddScoped<MigrationService>();
 // Data-access layer (repositories own SQL). First seam: engagements.
 builder.Services.AddScoped<PasMigration.Data.IEngagementRepository, PasMigration.Data.EngagementRepository>();
+builder.Services.AddScoped<PasMigration.Data.IUserRepository, PasMigration.Data.UserRepository>();
 // Session credential store: in-memory, 60-min sliding idle, cleared on restart.
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Encrypts credentials for persistence across restarts.
