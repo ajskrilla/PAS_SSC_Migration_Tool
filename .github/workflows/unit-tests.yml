@@ -1,0 +1,31 @@
+name: unit-tests
+
+# Runs the Tier 1 unit tests on every push and pull request to main.
+# The tests live in test/UnitTests and reference src/Api/Api.csproj, so restoring
+# the test project pulls in the app and all its packages. GitHub-hosted runners have
+# NuGet + network, so this is where the tests actually execute (the app's own build
+# sandbox cannot restore packages).
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore test/UnitTests/UnitTests.csproj
+
+      - name: Test
+        run: dotnet test test/UnitTests/UnitTests.csproj --no-restore --verbosity normal
