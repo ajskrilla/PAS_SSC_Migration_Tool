@@ -27,6 +27,8 @@ builder.Services.AddHttpClient("tenant").ConfigurePrimaryHttpMessageHandler(() =
 builder.Services.AddScoped<ConnectionService>();
 builder.Services.AddScoped<InventoryService>();
 builder.Services.AddScoped<MigrationService>();
+// Data-access layer (repositories own SQL). First seam: engagements.
+builder.Services.AddScoped<PasMigration.Data.IEngagementRepository, PasMigration.Data.EngagementRepository>();
 // Session credential store: in-memory, 60-min sliding idle, cleared on restart.
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Encrypts credentials for persistence across restarts.
@@ -124,19 +126,12 @@ app.MapGet("/health/ready", async (IDbConnection db) =>
 });
 
 // First real read endpoint: list engagements (proves DB wiring end-to-end).
-app.MapGet("/api/engagements", async (IDbConnection db) =>
-{
-    var rows = await db.QueryAsync(
-        "SELECT id, name, customer_name, status, created_at FROM engagement ORDER BY created_at DESC");
-    return Results.Ok(rows);
-});
+app.MapGet("/api/engagements", async (PasMigration.Data.IEngagementRepository repo, CancellationToken ct) =>
+    Results.Ok(await repo.ListAsync(ct)));
 
-app.MapPost("/api/engagements", async (IDbConnection db, CreateEngagement input) =>
+app.MapPost("/api/engagements", async (PasMigration.Data.IEngagementRepository repo, CreateEngagement input, CancellationToken ct) =>
 {
-    var id = await db.ExecuteScalarAsync<Guid>(
-        @"INSERT INTO engagement (name, customer_name) VALUES (@Name, @CustomerName)
-          RETURNING id",
-        new { input.Name, input.CustomerName });
+    var id = await repo.CreateAsync(input.Name, input.CustomerName, ct);
     return Results.Created($"/api/engagements/{id}", new { id });
 });
 
