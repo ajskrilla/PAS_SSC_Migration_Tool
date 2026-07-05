@@ -43,6 +43,20 @@ public interface IMigrationRepository
 
     /// <summary>Migration items for the status view (capped at 1000).</summary>
     Task<IEnumerable<dynamic>> GetStatusItemsAsync(Guid engagementId, CancellationToken ct = default);
+
+    // ── Overview /metrics aggregates (added 4c; isolated because these are the heaviest queries) ──
+
+    /// <summary>Account breakdown by bucket (multiplexed / domain / local_unix / local_windows).</summary>
+    Task<IEnumerable<dynamic>> GetAccountBreakdownAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>Managed vs unmanaged split across accounts.</summary>
+    Task<IEnumerable<dynamic>> GetManagedSplitAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>Per-type migration progress (total vs migrated) against the latest source snapshot.</summary>
+    Task<IEnumerable<dynamic>> GetProgressByTypeAsync(Guid engagementId, CancellationToken ct = default);
+
+    /// <summary>Source-vs-target item counts per type (latest snapshot each side, full outer join).</summary>
+    Task<IEnumerable<dynamic>> GetSourceVsTargetAsync(Guid engagementId, CancellationToken ct = default);
 }
 
 public sealed class MigrationRepository(IDbConnection db) : IMigrationRepository
@@ -120,5 +134,78 @@ public sealed class MigrationRepository(IDbConnection db) : IMigrationRepository
             @"SELECT item_type, name, source_native_id, target_native_id, status
               FROM migration_item WHERE engagement_id=@id
               ORDER BY item_type, name LIMIT 1000",
+            new { id = engagementId }, cancellationToken: ct));
+
+    // ── Overview /metrics aggregates (4c) ──────────────────────────────────────────────
+    // The first three aggregates all run over the latest source snapshot; this shared subquery
+    // is interpolated into each (identical to the pre-DAL inline handler).
+    private const string LatestSource = @"
+        SELECT ii.* FROM inventory_item ii
+        JOIN inventory_snapshot s ON s.id=ii.snapshot_id
+        JOIN tenant_connection tc ON tc.id=s.tenant_connection_id
+        WHERE s.engagement_id=@id AND tc.role='source'
+          AND s.captured_at=(SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+            JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+            WHERE s2.engagement_id=@id AND tc2.role='source')";
+
+    public async Task<IEnumerable<dynamic>> GetAccountBreakdownAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            $@"SELECT
+                 CASE
+                   WHEN item_type='multiplexed_account' THEN 'multiplexed'
+                   WHEN attributes->>'AccountScope'='domain' THEN 'domain'
+                   WHEN attributes->>'ComputerClass' ILIKE '%ssh%'
+                     OR attributes->>'ComputerClass' ILIKE '%unix%'
+                     OR attributes->>'ComputerClass' ILIKE '%linux%' THEN 'local_unix'
+                   ELSE 'local_windows'
+                 END AS bucket,
+                 COUNT(*) AS n
+               FROM ({LatestSource}) q
+               WHERE item_type IN ('account','multiplexed_account')
+               GROUP BY bucket",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetManagedSplitAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            $@"SELECT COALESCE(is_managed,false) AS is_managed, COUNT(*) AS n
+               FROM ({LatestSource}) q WHERE item_type='account'
+               GROUP BY COALESCE(is_managed,false)",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetProgressByTypeAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            $@"SELECT q.item_type AS type, COUNT(*) AS total,
+                      COUNT(mi.target_native_id) AS migrated
+               FROM ({LatestSource}) q
+               LEFT JOIN migration_item mi
+                 ON mi.engagement_id=@id AND mi.item_type=q.item_type
+                AND mi.source_native_id=q.source_native_id
+               GROUP BY q.item_type ORDER BY q.item_type",
+            new { id = engagementId }, cancellationToken: ct));
+
+    public async Task<IEnumerable<dynamic>> GetSourceVsTargetAsync(Guid engagementId, CancellationToken ct = default) =>
+        await db.QueryAsync(new CommandDefinition(
+            @"WITH latest_src AS (
+                SELECT ii.item_type, COUNT(*) n FROM inventory_item ii
+                JOIN inventory_snapshot s ON s.id=ii.snapshot_id
+                JOIN tenant_connection tc ON tc.id=s.tenant_connection_id
+                WHERE s.engagement_id=@id AND tc.role='source'
+                  AND s.captured_at=(SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                    JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+                    WHERE s2.engagement_id=@id AND tc2.role='source')
+                GROUP BY ii.item_type),
+              latest_tgt AS (
+                SELECT ii.item_type, COUNT(*) n FROM inventory_item ii
+                JOIN inventory_snapshot s ON s.id=ii.snapshot_id
+                JOIN tenant_connection tc ON tc.id=s.tenant_connection_id
+                WHERE s.engagement_id=@id AND tc.role='target'
+                  AND s.captured_at=(SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                    JOIN tenant_connection tc2 ON tc2.id=s2.tenant_connection_id
+                    WHERE s2.engagement_id=@id AND tc2.role='target')
+                GROUP BY ii.item_type)
+              SELECT COALESCE(s.item_type,t.item_type) AS type,
+                     COALESCE(s.n,0) AS source, COALESCE(t.n,0) AS target
+              FROM latest_src s FULL OUTER JOIN latest_tgt t ON s.item_type=t.item_type
+              ORDER BY type",
             new { id = engagementId }, cancellationToken: ct));
 }
