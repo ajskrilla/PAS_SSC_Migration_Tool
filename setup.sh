@@ -32,11 +32,15 @@ step "Checking Docker"
 if ! command -v docker >/dev/null 2>&1; then
   err "Docker is not installed or not on PATH."
   echo "    Install Docker Engine: https://docs.docker.com/engine/install/"
-  echo "    On Rocky/RHEL 10:"
+  echo "    On Rocky/RHEL 10 (per https://docs.rockylinux.org/10/gemstones/containers/docker/):"
   echo "      sudo dnf -y install dnf-plugins-core"
-  echo "      sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo"
-  echo "      sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin"
-  echo "      sudo systemctl enable --now docker"
+  echo "      sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo"
+  echo "      sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+  echo "      sudo systemctl --now enable docker"
+  echo "    Then let your user run docker without sudo:"
+  echo "      sudo usermod -aG docker \"\$USER\""
+  echo "      newgrp docker        # apply the group in THIS shell (or log out and back in)"
+  echo "    Verify:  docker run --rm hello-world"
   exit 1
 fi
 info "docker found: $(docker --version)"
@@ -46,7 +50,8 @@ if ! docker info >/dev/null 2>&1; then
   err "The Docker daemon isn't reachable."
   echo "    Start it:  sudo systemctl start docker"
   echo "    Or add yourself to the docker group so sudo isn't needed:"
-  echo "      sudo usermod -aG docker \"\$USER\"   # then log out and back in"
+  echo "      sudo usermod -aG docker \"\$USER\""
+  echo "      newgrp docker   # apply it in this shell now, or log out and back in"
   exit 1
 fi
 info "docker daemon is running"
