@@ -18,6 +18,7 @@ const Logs        = lazy(() => import("./components/Logs").then(m => ({ default:
 const Readiness   = lazy(() => import("./components/Readiness").then(m => ({ default: m.Readiness })));
 const Assistant   = lazy(() => import("./components/Assistant").then(m => ({ default: m.Assistant })));
 const Users       = lazy(() => import("./components/Users").then(m => ({ default: m.Users })));
+const Settings    = lazy(() => import("./components/Settings").then(m => ({ default: m.Settings })));
 
 function Shell() {
   const [user, setUser]           = useState<AuthUser | null>(null);
@@ -62,6 +63,7 @@ function Shell() {
     { to: "/logs",       label: "Logs" },
     { to: "/assistant",  label: "Assistant" },
     ...(isAdmin ? [{ to: "/users", label: "Users" }] : []),
+    ...(isAdmin ? [{ to: "/settings", label: "Settings" }] : []),
   ];
 
   return (
@@ -103,6 +105,7 @@ function Shell() {
             <Route path="/logs"        element={<Logs />} />
             <Route path="/assistant"   element={<Assistant />} />
             {isAdmin && <Route path="/users" element={<Users />} />}
+            {isAdmin && <Route path="/settings" element={<Settings />} />}
             <Route path="*"            element={<Placeholder />} />
           </Routes>
         </Suspense>

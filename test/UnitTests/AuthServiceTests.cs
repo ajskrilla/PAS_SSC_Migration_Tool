@@ -55,6 +55,17 @@ public class AuthServiceTests
             => Task.FromResult(1);
     }
 
+    /// <summary>In-memory fake settings store. Empty by default — tests exercise AuthService's
+    /// fallback-to-default behavior, not a specific configured timeout.</summary>
+    private sealed class FakeSettingsRepository : ISettingsRepository
+    {
+        private readonly Dictionary<string, string> _values = new();
+        public Task<string?> GetAsync(string key, CancellationToken ct = default)
+            => Task.FromResult(_values.TryGetValue(key, out var v) ? v : null);
+        public Task SetAsync(string key, string value, CancellationToken ct = default)
+        { _values[key] = value; return Task.CompletedTask; }
+    }
+
     private static AuthService MakeService(FakeUserRepository repo)
     {
         // A JWT secret long enough for HMAC-SHA256; supplied via in-memory config.
@@ -64,7 +75,7 @@ public class AuthServiceTests
                 ["Auth__JwtSecret"] = "test-only-secret-value-at-least-32-chars-long!!"
             })
             .Build();
-        return new AuthService(repo, cfg, NullLogger<AuthService>.Instance);
+        return new AuthService(repo, new FakeSettingsRepository(), cfg, NullLogger<AuthService>.Instance);
     }
 
     private static AppUser SampleUser(bool forcePwd = false) => new(

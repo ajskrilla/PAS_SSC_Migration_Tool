@@ -17,7 +17,7 @@ public sealed record AppUser(
     Guid[] EngagementIds);     // empty = all engagements
 
 public sealed record LoginRequest(string Username, string Password);
-public sealed record LoginResult(bool Success, string? Token, AppUser? User, string? Error);
+public sealed record LoginResult(bool Success, string? Token, DateTimeOffset? Expires, AppUser? User, string? Error);
 public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 
 /// <summary>
@@ -26,9 +26,25 @@ public sealed record ChangePasswordRequest(string CurrentPassword, string NewPas
 /// this class contains no SQL. The cryptographic behavior is unchanged from the pre-DAL version:
 /// BCrypt.Verify / HashPassword calls happen here, exactly as before.
 /// </summary>
-public sealed class AuthService(IUserRepository users, IConfiguration cfg, ILogger<AuthService> log)
+public sealed class AuthService(IUserRepository users, ISettingsRepository settings, IConfiguration cfg, ILogger<AuthService> log)
 {
     private const int BcryptCost = 12;
+    private const int DefaultSessionTimeoutHours = 8;
+    public const int MinSessionTimeoutHours = 1;
+    public const int MaxSessionTimeoutHours = 168; // 1 week — a sane upper bound, not a hard product requirement
+
+    /// <summary>
+    /// Reads the admin-configured session length from app_setting. Falls back to the original
+    /// hardcoded default if unset, unparseable, or outside sane bounds — a corrupted or
+    /// out-of-range value here should never lock everyone out or grant month-long sessions.
+    /// </summary>
+    private async Task<int> GetSessionTimeoutHoursAsync(CancellationToken ct)
+    {
+        var raw = await settings.GetAsync("session_timeout_hours", ct);
+        if (int.TryParse(raw, out var hours) && hours is >= MinSessionTimeoutHours and <= MaxSessionTimeoutHours)
+            return hours;
+        return DefaultSessionTimeoutHours;
+    }
 
     // ── Login ────────────────────────────────────────────────────────────────────────
 
@@ -36,21 +52,21 @@ public sealed class AuthService(IUserRepository users, IConfiguration cfg, ILogg
     {
         var found = await users.FindActiveByLoginWithHashAsync(req.Username, ct);
         if (found is null)
-            return new(false, null, null, "Invalid username or password.");
+            return new(false, null, null, null, "Invalid username or password.");
 
         if (string.IsNullOrEmpty(found.PasswordHash) ||
             !BCrypt.Net.BCrypt.Verify(req.Password, found.PasswordHash))
         {
             log.LogWarning("Failed login for {User}", req.Username);
-            return new(false, null, null, "Invalid username or password.");
+            return new(false, null, null, null, "Invalid username or password.");
         }
 
         var user = found.User;
         await users.TouchLastLoginAsync(user.Id, ct);
 
-        var token = GenerateToken(user);
+        var (token, expires) = await GenerateTokenAsync(user, ct);
         log.LogInformation("Login: {User} role={Role}", user.Username, user.Role);
-        return new(true, token, user, null);
+        return new(true, token, expires, user, null);
     }
 
     // ── Change password ──────────────────────────────────────────────────────────────
@@ -118,8 +134,17 @@ public sealed class AuthService(IUserRepository users, IConfiguration cfg, ILogg
 
     // ── JWT ───────────────────────────────────────────────────────────────────────────
 
-    public string GenerateToken(AppUser user)
+    /// <summary>
+    /// Issues a JWT whose expiry reflects the admin-configured session timeout (app_setting
+    /// "session_timeout_hours", falling back to 8h). Returns the expiry alongside the token so
+    /// the caller's cookie can be set to the exact same instant — the JWT's own "exp" claim and
+    /// the cookie's Expires must never drift apart, or one would outlive the other.
+    /// </summary>
+    public async Task<(string Token, DateTimeOffset Expires)> GenerateTokenAsync(AppUser user, CancellationToken ct = default)
     {
+        var hours = await GetSessionTimeoutHoursAsync(ct);
+        var expires = DateTimeOffset.UtcNow.AddHours(hours);
+
         var key  = GetKey();
         var creds= new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
         var claims = new List<Claim>
@@ -136,10 +161,10 @@ public sealed class AuthService(IUserRepository users, IConfiguration cfg, ILogg
             issuer:             "pas-migration",
             audience:           "pas-migration",
             claims:             claims,
-            expires:            DateTime.UtcNow.AddHours(8),
+            expires:            expires.UtcDateTime,
             signingCredentials: creds);
 
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        return (new JwtSecurityTokenHandler().WriteToken(token), expires);
     }
 
     public SymmetricSecurityKey GetKey()

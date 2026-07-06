@@ -33,6 +33,7 @@ builder.Services.AddScoped<PasMigration.Data.IUserRepository, PasMigration.Data.
 builder.Services.AddScoped<PasMigration.Data.ICredentialRepository, PasMigration.Data.CredentialRepository>();
 builder.Services.AddScoped<PasMigration.Data.IInventoryRepository, PasMigration.Data.InventoryRepository>();
 builder.Services.AddScoped<PasMigration.Data.IMigrationRepository, PasMigration.Data.MigrationRepository>();
+builder.Services.AddScoped<PasMigration.Data.ISettingsRepository, PasMigration.Data.SettingsRepository>();
 // Connector factories (own HttpClient creation; make services testable with fake clients).
 builder.Services.AddSingleton<PasMigration.Connectors.IPasConnectorFactory, PasMigration.Connectors.PasConnectorFactory>();
 builder.Services.AddSingleton<PasMigration.Connectors.ISecretServerConnectorFactory, PasMigration.Connectors.SecretServerConnectorFactory>();
@@ -522,7 +523,7 @@ app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, HttpRe
     response.Cookies.Append("auth_token", result.Token!, new CookieOptions
     {
         HttpOnly = true, Secure = false, SameSite = SameSiteMode.Strict,
-        Expires = DateTimeOffset.UtcNow.AddHours(8),
+        Expires = result.Expires,
     });
     return Results.Ok(new { user = new {
         id = result.User!.Id, username = result.User.Username,
@@ -540,7 +541,7 @@ app.MapPost("/api/auth/logout", (HttpResponse response) =>
 
 app.MapPost("/api/auth/change-password",
     async (ChangePasswordRequest req, AuthService auth, ClaimsPrincipal user,
-           HttpResponse response) =>
+           HttpResponse response, CancellationToken ct) =>
     {
         var userId = Guid.Parse(user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? Guid.Empty.ToString());
         var (ok, err) = await auth.ChangePasswordAsync(userId, req);
@@ -551,11 +552,11 @@ app.MapPost("/api/auth/change-password",
         var updated = users.FirstOrDefault(u => u.Id == userId);
         if (updated is not null)
         {
-            var newToken = auth.GenerateToken(updated);
+            var (newToken, expires) = await auth.GenerateTokenAsync(updated, ct);
             response.Cookies.Append("auth_token", newToken, new CookieOptions
             {
                 HttpOnly = true, Secure = false, SameSite = SameSiteMode.Strict,
-                Expires = DateTimeOffset.UtcNow.AddHours(8),
+                Expires = expires,
             });
         }
         return Results.Ok(new { message = "Password changed." });
@@ -595,6 +596,35 @@ app.MapPost("/api/admin/users/{id:guid}/reset-password",
     {
         var (ok, msg) = await auth.ResetPasswordAsync(id);
         return ok ? Results.Ok(new { message = msg }) : Results.NotFound(new { error = msg });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+// ---- Admin: app settings (currently just the login session length) ----
+app.MapGet("/api/admin/settings",
+    async (PasMigration.Data.ISettingsRepository settings, CancellationToken ct) =>
+    {
+        var raw = await settings.GetAsync("session_timeout_hours", ct);
+        var hours = int.TryParse(raw, out var h) ? h : 8;
+        return Results.Ok(new
+        {
+            sessionTimeoutHours = hours,
+            minSessionTimeoutHours = AuthService.MinSessionTimeoutHours,
+            maxSessionTimeoutHours = AuthService.MaxSessionTimeoutHours,
+        });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/settings",
+    async (UpdateSettingsRequest req, PasMigration.Data.ISettingsRepository settings, CancellationToken ct) =>
+    {
+        if (req.SessionTimeoutHours is < AuthService.MinSessionTimeoutHours or > AuthService.MaxSessionTimeoutHours)
+            return Results.BadRequest(new
+            {
+                message = $"Session timeout must be between {AuthService.MinSessionTimeoutHours} and " +
+                           $"{AuthService.MaxSessionTimeoutHours} hours."
+            });
+        await settings.SetAsync("session_timeout_hours", req.SessionTimeoutHours.ToString(), ct);
+        // Deliberately does not affect anyone already logged in — only tokens issued from now on
+        // use the new length. Existing sessions keep whatever expiry they were issued with.
+        return Results.Ok(new { message = "Settings saved. Applies to new logins — existing sessions are unaffected." });
     }).RequireAuthorization(p => p.RequireRole("admin"));
 
 // ---- Migration Assistant (read-only AI advisor; streams SSE) ----
@@ -651,3 +681,4 @@ app.Run();
 public record CreateEngagement(string Name, string CustomerName);
 public record RevertRequest(bool Confirm, MigrationRunInput Connection);
 public record CreateFileTemplateRequest(TestConnectionInput Connection, string Name);
+public record UpdateSettingsRequest(int SessionTimeoutHours);

@@ -166,6 +166,17 @@ export const api = {
     credFetch(`/api/engagements/${engagementId}/credentials/clear`, { method: "POST" })
       .then(json<{ cleared: boolean }>),
 
+  getSettings: () =>
+    credFetch(`/api/admin/settings`)
+      .then(json<{ sessionTimeoutHours: number; minSessionTimeoutHours: number; maxSessionTimeoutHours: number }>),
+
+  updateSettings: (sessionTimeoutHours: number) =>
+    credFetch(`/api/admin/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionTimeoutHours }),
+    }).then(json<{ message: string }>),
+
   logs: (engagementId: string, limit = 50, offset = 0, q = "", eventType = "", failuresOnly = false) => {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (q) params.set("q", q);
