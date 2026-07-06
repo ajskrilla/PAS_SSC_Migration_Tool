@@ -10,6 +10,9 @@ interface Turn {
   directData: Record<string, unknown> | null;
   isLoading?: boolean;
   phases?: Phase[];
+  startedAt?: number;   // Date.now() when the turn was submitted
+  finishedAt?: number;  // Date.now() when it reached a final state (done/error/direct/cancelled)
+  tokenCount?: number;  // running count of streamed token chunks — real progress, not a fabricated %
 }
 
 // ── Persist across navigation ──────────────────────────────────────────────────
@@ -20,6 +23,14 @@ function loadState(): { engId: string; history: Turn[] } {
 }
 function saveState(s: { engId: string; history: Turn[] }) {
   try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch { /* quota */ }
+}
+
+// ── Elapsed-time formatting (e.g. "12s", "1m 18s") ─────────────────────────────
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 // ── Inline markdown renderer ───────────────────────────────────────────────────
@@ -286,18 +297,27 @@ export function Assistant() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [history]);
 
+  // Forces a re-render every 250ms while a request is in flight, purely so the live elapsed-time
+  // display below (computed inline from Date.now() - turn.startedAt) actually ticks visibly.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    const t = setInterval(() => setTick(x => x + 1), 250);
+    return () => clearInterval(t);
+  }, [busy]);
+
   const abort = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
     setBusy(false);
-    setHistory(h => h.map(t => t.isLoading ? { ...t, isLoading: false, answer: t.answer || "(cancelled)" } : t));
+    setHistory(h => h.map(t => t.isLoading ? { ...t, isLoading: false, finishedAt: Date.now(), answer: t.answer || "(cancelled)" } : t));
   }, []);
 
   async function ask(question: string) {
     if (!engId || !question.trim() || busy) return;
     const controller = new AbortController();
     abortRef.current = controller;
-    setHistory(h => [...h, { question, answer: "", toolUsed: null, directData: null, isLoading: true }]);
+    setHistory(h => [...h, { question, answer: "", toolUsed: null, directData: null, isLoading: true, startedAt: Date.now(), tokenCount: 0 }]);
     setInput("");
     setBusy(true);
 
@@ -361,24 +381,26 @@ export function Assistant() {
               ? raw as Record<string, unknown>
               : (() => { try { return JSON.parse(String(raw)); } catch { return null; } })();
             setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], directData, isLoading: false,
+              finishedAt: Date.now(),
               phases: (h[h.length-1]?.phases ?? []).map(p => ({ ...p, done: true })) }]);
           } else if (msg.type === "token") {
             accumulated += msg.text;
-            setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], answer: accumulated }]);
+            setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], answer: accumulated,
+              tokenCount: (h[h.length-1]?.tokenCount ?? 0) + 1 }]);
           } else if (msg.type === "done") {
             setHistory(h => [...h.slice(0, -1), { ...h[h.length-1],
-              answer: accumulated, isLoading: false,
+              answer: accumulated, isLoading: false, finishedAt: Date.now(),
               phases: (h[h.length-1]?.phases ?? []).map(p => ({ ...p, done: true })) }]);
           } else if (msg.type === "error") {
             setHistory(h => [...h.slice(0, -1), { ...h[h.length-1],
-              answer: "Error: " + msg.message, isLoading: false }]);
+              answer: "Error: " + msg.message, isLoading: false, finishedAt: Date.now() }]);
           }
         }
       }
     } catch (err: unknown) {
       if ((err as Error)?.name === "AbortError") return;
       const msg = err instanceof Error ? err.message : "Unknown error";
-      setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], answer: "Error: " + msg, isLoading: false }]);
+      setHistory(h => [...h.slice(0, -1), { ...h[h.length-1], answer: "Error: " + msg, isLoading: false, finishedAt: Date.now() }]);
     } finally {
       abortRef.current = null;
       setBusy(false);
@@ -437,16 +459,31 @@ export function Assistant() {
                     Assistant
                     {turn.toolUsed && <span className="tool-tag">via {turn.toolUsed.replace(/_/g, " ")}</span>}
                     {turn.isLoading && <span className="streaming-dot" />}
+                    {turn.startedAt !== undefined && (
+                      <span className="elapsed-badge">
+                        {formatElapsed((turn.finishedAt ?? Date.now()) - turn.startedAt)}
+                      </span>
+                    )}
                   </span>
 
                   {/* Phase timeline */}
                   {turn.phases && turn.phases.length > 0 && (
                     <div className="phase-timeline">
                       {turn.phases.map((ph, pi) => (
-                        <div key={pi} className={"phase-step " + (ph.done ? "done" : "active")}>
-                          <span className="phase-icon">{ph.done ? "✓" : "●"}</span>
-                          <span className="phase-label">{ph.detail}</span>
-                          {!ph.done && <span className="streaming-dot" />}
+                        <div key={pi} className="phase-step-wrap">
+                          <div className={"phase-step " + (ph.done ? "done" : "active")}>
+                            <span className="phase-icon">{ph.done ? "✓" : "●"}</span>
+                            <span className="phase-label">{ph.detail}</span>
+                            {!ph.done && (turn.tokenCount ?? 0) > 0 && (
+                              <span className="token-count">{turn.tokenCount} tokens</span>
+                            )}
+                            {!ph.done && <span className="streaming-dot" />}
+                          </div>
+                          {/* Indeterminate — token-by-token streaming has no known total, so this
+                              shows activity honestly rather than a fabricated percentage. */}
+                          {!ph.done && (
+                            <div className="phase-progress-track"><div className="phase-progress-fill" /></div>
+                          )}
                         </div>
                       ))}
                     </div>

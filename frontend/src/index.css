@@ -537,6 +537,32 @@ table.data tr:last-child td { border-bottom: none; }
 .phase-icon { font-size: .7rem; width: 14px; text-align: center; flex-shrink: 0; }
 .phase-label { flex: 1; }
 
+/* Wraps a phase-step row + its optional progress bar so the bar sits on its own line
+   below the row without disturbing the row's flex layout. */
+.phase-step-wrap { display: flex; flex-direction: column; gap: .25rem; }
+
+/* Indeterminate — we stream tokens one at a time with no known total, so a real
+   percentage isn't knowable. This communicates "actively working" honestly instead
+   of faking a completion percent. */
+.phase-progress-track {
+  height: 3px; border-radius: 2px; background: var(--surface-2); overflow: hidden;
+  margin-left: 18px; /* aligns under phase-label, past the icon column */
+}
+.phase-progress-fill {
+  height: 100%; width: 30%; border-radius: 2px; background: var(--accent);
+  position: relative; animation: phase-sweep 1.2s ease-in-out infinite;
+}
+@keyframes phase-sweep {
+  0%   { margin-left: -30%; }
+  100% { margin-left: 100%; }
+}
+
+.elapsed-badge {
+  font-size: .72rem; color: var(--text-muted); margin-left: .5rem;
+  font-variant-numeric: tabular-nums; /* keeps the ticking seconds from jittering in width */
+}
+.token-count { font-size: .72rem; color: var(--text-muted); margin-left: auto; padding-left: .5rem; }
+
 /* ── Direct data cards ───────────────────────────────────────────────────── */
 .direct-card { background: var(--surface-3); border-radius: var(--radius); padding: .75rem; margin-top: .4rem; font-size: .88rem; }
 .prereq-row { display: flex; align-items: flex-start; gap: .5rem; padding: .35rem 0; border-bottom: 1px solid var(--border); }
