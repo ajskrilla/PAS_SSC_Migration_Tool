@@ -122,11 +122,25 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 // This closes the previous gap where only the auth/admin endpoints were protected and all
 // business endpoints (migrate, revert, inventory, credentials, assistant, diagnostics) were
 // anonymous. Only login, logout, and the health probes opt out below.
+builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler, EngagementMemberHandler>();
 builder.Services.AddAuthorization(o =>
 {
     o.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
         .Build();
+
+    // Read access to one engagement's data: any authenticated role (viewer+), but only for
+    // engagements in the caller's eng_ids claim (empty = all; admin = all). Enforced by
+    // EngagementMemberHandler against the "{id}" route value.
+    o.AddPolicy("EngagementMember", p => p
+        .RequireAuthenticatedUser()
+        .AddRequirements(new EngagementMemberRequirement()));
+
+    // Mutating or tenant-API-touching actions: operator or admin, engagement-scoped where
+    // the route carries an engagement id (vacuous on non-engagement routes like /api/templates).
+    o.AddPolicy("OperatorWrite", p => p
+        .RequireRole("operator", "admin")
+        .AddRequirements(new EngagementMemberRequirement()));
 });
 
 // In production the SPA is served same-origin through the nginx reverse proxy, so CORS
@@ -174,23 +188,37 @@ app.MapGet("/health/ready", async (IDbConnection db) =>
 }).AllowAnonymous();
 
 // First real read endpoint: list engagements (proves DB wiring end-to-end).
-app.MapGet("/api/engagements", async (PasMigration.Data.IEngagementRepository repo, CancellationToken ct) =>
-    Results.Ok(await repo.ListAsync(ct)));
+// Scoped to the caller's eng_ids claim (empty = all; admin = all) so restricted users
+// don't see engagements they can't open.
+app.MapGet("/api/engagements", async (PasMigration.Data.IEngagementRepository repo,
+                                      ClaimsPrincipal user, CancellationToken ct) =>
+{
+    var rows = await repo.ListAsync(ct);
+    var engIds = user.FindFirst("eng_ids")?.Value;
+    if (!user.IsInRole("admin") && !string.IsNullOrWhiteSpace(engIds))
+    {
+        var allowed = engIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        rows = rows.Where(r => allowed.Contains(
+            ((IDictionary<string, object>)r)["id"].ToString()!)).ToList();
+    }
+    return Results.Ok(rows);
+});
 
 app.MapPost("/api/engagements", async (PasMigration.Data.IEngagementRepository repo, CreateEngagement input, CancellationToken ct) =>
 {
     var id = await repo.CreateAsync(input.Name, input.CustomerName, ct);
     return Results.Created($"/api/engagements/{id}", new { id });
-});
+}).RequireAuthorization("OperatorWrite");
 
 // ---- Tenant connections (metadata only; credentials never persisted) ----
 
 app.MapGet("/api/engagements/{id:guid}/connections",
-    async (Guid id, ConnectionService svc) => Results.Ok(await svc.ListAsync(id)));
+    async (Guid id, ConnectionService svc) => Results.Ok(await svc.ListAsync(id))).RequireAuthorization("EngagementMember");
 
 app.MapPut("/api/engagements/{id:guid}/connections",
     async (Guid id, ConnectionInput input, ConnectionService svc) =>
-        Results.Ok(new { id = await svc.UpsertAsync(id, input) }));
+        Results.Ok(new { id = await svc.UpsertAsync(id, input) })).RequireAuthorization("OperatorWrite");
 
 // Live auth handshake. On success, cache credentials in the session vault so subsequent
 // inventory/migration actions don't require re-entry. Credentials stay in memory only.
@@ -215,7 +243,7 @@ app.MapPost("/api/connections/test",
                 await enc.SaveAsync(tcId.Value, eng, creds2, ct);
         }
         return result.Success ? Results.Ok(result) : Results.BadRequest(result);
-    });
+    }).RequireAuthorization("OperatorWrite");
 
 
 // Returns non-sensitive credential metadata for display (no secrets).
@@ -244,7 +272,7 @@ app.MapGet("/api/engagements/{id:guid}/credentials/info",
             source = Mask(vault.Get(id, "source")),
             target = Mask(vault.Get(id, "target")),
         });
-    });
+    }).RequireAuthorization("EngagementMember");
 
 // Which roles currently have active session credentials (for the UI badge).
 app.MapGet("/api/engagements/{id:guid}/credentials/status",
@@ -254,11 +282,11 @@ app.MapGet("/api/engagements/{id:guid}/credentials/status",
         if (!vault.Has(id, "source") && !vault.Has(id, "target"))
             await enc.LoadIntoVaultAsync(id, vault, ct);
         return Results.Ok(new { source = vault.Has(id, "source"), target = vault.Has(id, "target") });
-    });
+    }).RequireAuthorization("EngagementMember");
 
 // Explicit sign-out: forget session credentials for this engagement.
 app.MapPost("/api/engagements/{id:guid}/credentials/clear",
-    (Guid id, CredentialVault vault) => { vault.Clear(id); return Results.Ok(new { cleared = true }); });
+    (Guid id, CredentialVault vault) => { vault.Clear(id); return Results.Ok(new { cleared = true }); }).RequireAuthorization("OperatorWrite");
 
 // ---- Inventory (read-only) ----
 
@@ -293,12 +321,12 @@ app.MapPost("/api/engagements/{id:guid}/inventory/run",
 
         try { return Results.Ok(await svc.CaptureAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
-    });
+    }).RequireAuthorization("OperatorWrite");
 
 // Recompute the source/target reconciliation diff.
 app.MapPost("/api/engagements/{id:guid}/reconcile",
     async (Guid id, InventoryService svc) =>
-        Results.Ok(new { count = await svc.ReconcileAsync(id) }));
+        Results.Ok(new { count = await svc.ReconcileAsync(id) })).RequireAuthorization("OperatorWrite");
 
 // Latest snapshot summaries per role (for dashboard cards).
 app.MapGet("/api/engagements/{id:guid}/inventory/summary",
@@ -324,7 +352,7 @@ app.MapGet("/api/engagements/{id:guid}/inventory/summary",
             };
         });
         return Results.Ok(shaped);
-    });
+    }).RequireAuthorization("EngagementMember");
 
 // Inventory items for a snapshot (drill-down table).
 app.MapGet("/api/snapshots/{snapshotId:guid}/items",
@@ -334,7 +362,7 @@ app.MapGet("/api/snapshots/{snapshotId:guid}/items",
 // Reconciliation results (diff table).
 app.MapGet("/api/engagements/{id:guid}/reconciliation",
     async (Guid id, PasMigration.Data.IInventoryRepository inventory, CancellationToken ct) =>
-        Results.Ok(await inventory.GetReconciliationAsync(id, ct)));
+        Results.Ok(await inventory.GetReconciliationAsync(id, ct))).RequireAuthorization("EngagementMember");
 
 // ---- Migration (write; dry-run aware) ----
 
@@ -366,7 +394,7 @@ app.MapPost("/api/templates/create-file",
         }
         try { return Results.Ok(await svc.CreateFileTemplateAsync(conn, req.Name, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
-    });
+    }).RequireAuthorization("OperatorWrite");
 
 app.MapPost("/api/templates",
     async (TestConnectionInput input, ConnectionService svc,
@@ -397,7 +425,7 @@ app.MapPost("/api/templates",
         }
         try { return Results.Ok(await svc.ListTemplatesAsync(input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
-    });
+    }).RequireAuthorization("OperatorWrite");
 
 app.MapPost("/api/engagements/{id:guid}/migrate",
     async (Guid id, MigrationRunInput input, MigrationService svc,
@@ -430,7 +458,7 @@ app.MapPost("/api/engagements/{id:guid}/migrate",
 
         try { return Results.Ok(await svc.RunAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
-    });
+    }).RequireAuthorization("OperatorWrite");
 
 // Revert: delete tool-created target items (lab testing). Requires explicit confirm=true.
 app.MapPost("/api/engagements/{id:guid}/revert",
@@ -461,7 +489,7 @@ app.MapPost("/api/engagements/{id:guid}/revert",
         }
         try { return Results.Ok(await svc.RevertAsync(id, conn, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
-    });
+    }).RequireAuthorization("OperatorWrite");
 
 // Migration report: jobs + per-item outcomes + event timeline.
 app.MapGet("/api/engagements/{id:guid}/migration/report",
@@ -470,7 +498,7 @@ app.MapGet("/api/engagements/{id:guid}/migration/report",
         var jobs  = await migrations.GetJobsAsync(id, ct);
         var items = await migrations.GetReportItemsAsync(id, ct);
         return Results.Ok(new { jobs, items });
-    });
+    }).RequireAuthorization("EngagementMember");
 
 // Source items for the migration checklist (from latest source snapshot).
 // Overview metrics: account breakdown (win/unix/domain/multiplexed), managed split,
@@ -484,11 +512,11 @@ app.MapGet("/api/engagements/{id:guid}/metrics",
         var sourceVsTarget = (await migrations.GetSourceVsTargetAsync(id, ct)).ToList();
 
         return Results.Ok(new { accounts, managed, progress, sourceVsTarget });
-    });
+    }).RequireAuthorization("EngagementMember");
 
 app.MapGet("/api/engagements/{id:guid}/source-items",
     async (Guid id, PasMigration.Data.IMigrationRepository migrations, string? type, string? scope, CancellationToken ct) =>
-        Results.Ok(await migrations.GetSourceItemsAsync(id, type, scope, ct)));
+        Results.Ok(await migrations.GetSourceItemsAsync(id, type, scope, ct))).RequireAuthorization("EngagementMember");
 
 // Event log (audit + diagnostics): every tenant action with outcome and message.
 // Migration delta/status: how many of each item type are migrated vs pending vs failed.
@@ -503,7 +531,7 @@ app.MapGet("/api/engagements/{id:guid}/logs",
         var total = await migrations.CountEventsAsync(id, q, eventType, failOnly, ct);
         var rows  = await migrations.GetEventsAsync(id, q, eventType, failOnly, lim, off, ct);
         return Results.Ok(new { total, limit = lim, offset = off, rows });
-    });
+    }).RequireAuthorization("EngagementMember");
 
 // The currently-running job for an engagement (so the UI can offer an abort button
 // even though the migrate request is still in flight).
@@ -512,14 +540,14 @@ app.MapGet("/api/engagements/{id:guid}/running-job",
     {
         var job = await migrations.GetRunningJobAsync(id, ct);
         return Results.Ok(job is null ? new { running = false } : new { running = true, job });
-    });
+    }).RequireAuthorization("EngagementMember");
 
 // Abort a running migration job.
 app.MapPost("/api/jobs/{jobId:guid}/cancel",
     (Guid jobId, JobRegistry jobs) =>
         jobs.Cancel(jobId)
             ? Results.Ok(new { cancelled = true })
-            : Results.NotFound(new { message = "Job not running (already finished or unknown)." }));
+            : Results.NotFound(new { message = "Job not running (already finished or unknown)." })).RequireAuthorization("OperatorWrite");
 
 // Migration delta: per-type counts of what's migrated vs pending, plus the item list.
 app.MapGet("/api/engagements/{id:guid}/migration-status",
@@ -528,7 +556,7 @@ app.MapGet("/api/engagements/{id:guid}/migration-status",
         var summary = await migrations.GetStatusSummaryAsync(id, ct);
         var items   = await migrations.GetStatusItemsAsync(id, ct);
         return Results.Ok(new { summary, items });
-    });
+    }).RequireAuthorization("EngagementMember");
 
 
 // ── Auth endpoints ────────────────────────────────────────────────────────────────────
@@ -677,7 +705,7 @@ app.MapPost("/api/engagements/{id:guid}/assistant",
             await ctx.Response.WriteAsync(msg, ct);
             await ctx.Response.Body.FlushAsync(ct);
         }
-    });
+    }).RequireAuthorization("EngagementMember");
 
 app.MapGet("/api/diag/ollama", async ([FromServices] ILlmProvider llm, [FromServices] IConfiguration cfg) =>
 {
@@ -693,7 +721,7 @@ app.MapGet("/api/diag/ollama", async ([FromServices] ILlmProvider llm, [FromServ
     {
         return Results.Ok(new { endpoint, chatModel, embedModel, embed_test = "error: " + ex.Message });
     }
-});
+}).RequireAuthorization(p => p.RequireRole("admin"));
 
 app.Run();
 
