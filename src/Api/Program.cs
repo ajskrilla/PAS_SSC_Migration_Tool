@@ -223,8 +223,33 @@ app.MapPost("/api/engagements/{id:guid}/credentials/clear",
 
 // Run a full inventory capture for one tenant role using session credentials.
 app.MapPost("/api/engagements/{id:guid}/inventory/run",
-    async (Guid id, RunInventoryInput input, InventoryService svc, CancellationToken ct) =>
+    async (Guid id, RunInventoryInput input, InventoryService svc,
+           CredentialVault vault, CredentialEncryptionService enc,
+           CancellationToken ct) =>
     {
+        // Auto-load persisted credentials if vault is empty (e.g. after restart) — mirrors
+        // /migrate so "Run inventory" works without re-entering the secret every time.
+        if (!vault.Has(id, input.Role))
+            await enc.LoadIntoVaultAsync(id, vault, ct);
+
+        // Merge stored credentials into input — the frontend may send blank credential
+        // fields once they're already stored server-side for this role.
+        var stored = vault.Get(id, input.Role);
+        if (stored is not null)
+        {
+            input = input with
+            {
+                BaseUrl             = stored.BaseUrl ?? input.BaseUrl,
+                PlatformBaseUrl     = stored.PlatformBaseUrl ?? input.PlatformBaseUrl,
+                SecretServerBaseUrl = stored.SecretServerBaseUrl ?? input.SecretServerBaseUrl,
+                AppId               = stored.AppId ?? input.AppId,
+                ClientId            = stored.ClientId.Length > 0 ? stored.ClientId : input.ClientId,
+                ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : input.ClientSecret,
+                Username            = stored.Username ?? input.Username,
+                Scope               = stored.Scope ?? input.Scope,
+            };
+        }
+
         try { return Results.Ok(await svc.CaptureAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     });

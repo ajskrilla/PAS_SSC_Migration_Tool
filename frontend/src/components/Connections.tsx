@@ -112,8 +112,8 @@ export function Connections() {
 
       {engagementId && (
         <div className="conn-grid">
-          <ConnectionCard role="source" engagementId={engagementId} />
-          <ConnectionCard role="target" engagementId={engagementId} />
+          <ConnectionCard role="source" engagementId={engagementId} hasStoredCreds={!!credInfo?.source} />
+          <ConnectionCard role="target" engagementId={engagementId} hasStoredCreds={!!credInfo?.target} />
         </div>
       )}
 
@@ -211,7 +211,7 @@ function InventoryExport({
   );
 }
 
-function ConnectionCard({ role, engagementId }: { role: Role; engagementId: string }) {
+function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; engagementId: string; hasStoredCreds: boolean }) {
   // Source is PAS; target is Secret Server / Platform.
   const systemType: "pas" | "secret_server" = role === "source" ? "pas" : "secret_server";
   const [form, setForm] = useState<FormState>(blankForm("platform_client_credentials"));
@@ -221,6 +221,7 @@ function ConnectionCard({ role, engagementId }: { role: Role; engagementId: stri
   const [result, setResult] = useState<TestConnectionResult | null>(null);
   const [invMsg, setInvMsg] = useState<string | null>(null);
   const [tested, setTested] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
   const [saved, setSaved] = useState(false);
 
@@ -229,6 +230,7 @@ function ConnectionCard({ role, engagementId }: { role: Role; engagementId: stri
     setResult(null);
     setSaved(false);
     setTested(false);
+    setDirty(true);
     setInvMsg(null);
   };
 
@@ -308,6 +310,10 @@ function ConnectionCard({ role, engagementId }: { role: Role; engagementId: stri
   };
 
   const isLegacy = form.authMode === "legacy_password";
+  // Enabled after a fresh successful test, OR if this role already has credentials stored
+  // server-side and the operator hasn't edited the form since the page loaded (editing implies
+  // they may be changing values, which need a fresh test before we trust them again).
+  const canRunInventory = tested || (hasStoredCreds && !dirty);
 
   return (
     <section className="panel conn-card">
@@ -369,8 +375,8 @@ function ConnectionCard({ role, engagementId }: { role: Role; engagementId: stri
           {testing ? "Testing…" : "Test connection"}
         </button>
         <button className="btn" onClick={runInventory}
-          disabled={running || !tested}
-          title={tested ? "Capture a full read-only inventory" : "Test the connection first"}>
+          disabled={running || !canRunInventory}
+          title={canRunInventory ? "Capture a full read-only inventory" : "Test the connection first"}>
           {running ? "Running…" : "Run inventory"}
         </button>
       </div>
