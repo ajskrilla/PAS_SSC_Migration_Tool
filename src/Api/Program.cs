@@ -631,9 +631,9 @@ app.MapPost("/api/engagements/{id:guid}/assistant",
 
 app.MapGet("/api/diag/ollama", async ([FromServices] ILlmProvider llm, [FromServices] IConfiguration cfg) =>
 {
-    var endpoint  = cfg["Ai__Ollama__Endpoint"]  ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")  ?? "(not set)";
-    var chatModel = cfg["Ai__Ollama__ChatModel"]  ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL") ?? "(not set)";
-    var embedModel= cfg["Ai__Ollama__EmbedModel"] ?? Environment.GetEnvironmentVariable("OLLAMA_EMBED_MODEL")?? "(not set)";
+    var endpoint  = cfg["Ai:Ollama:Endpoint"]  ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")  ?? "(not set)";
+    var chatModel = cfg["Ai:Ollama:ChatModel"]  ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL") ?? "(not set)";
+    var embedModel= cfg["Ai:Ollama:EmbedModel"] ?? Environment.GetEnvironmentVariable("OLLAMA_EMBED_MODEL")?? "(not set)";
     try
     {
         var embedding = await llm.EmbedAsync("ping", CancellationToken.None);

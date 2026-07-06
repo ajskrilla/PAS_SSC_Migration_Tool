@@ -24,18 +24,21 @@ public sealed class OllamaProvider : ILlmProvider
     public OllamaProvider(IHttpClientFactory factory, IConfiguration cfg, ILogger<OllamaProvider> log)
     {
         _factory    = factory;
-        // Try ASP.NET config key first, then direct env var, then default.
-        // The compose file injects these as Ai__Ollama__* but .env wiring
-        // can fail if env_file isn't set — fall back to direct env var names.
-        _chatModel  = cfg["Ai__Ollama__ChatModel"]
+        // IConfiguration normalizes env var names on load: "Ai__Ollama__ChatModel" (the env var
+        // name docker-compose sets) becomes the config key "Ai:Ollama:ChatModel" (colon-separated)
+        // internally. Indexing with the double-underscore form never matches anything, which is
+        // why every one of these was silently falling through to its hardcoded last-resort
+        // default — harmless for embed (the default happens to match what's pulled) but wrong
+        // for chat (the default doesn't match what's actually pulled).
+        _chatModel  = cfg["Ai:Ollama:ChatModel"]
                    ?? cfg["OLLAMA_CHAT_MODEL"]
                    ?? Environment.GetEnvironmentVariable("OLLAMA_CHAT_MODEL")
-                   ?? "qwen2.5:3b";   // safe default — llama3.1:8b may not be pulled
-        _embedModel = cfg["Ai__Ollama__EmbedModel"]
+                   ?? "qwen2.5:3b";   // last-resort default — only hit if nothing is configured
+        _embedModel = cfg["Ai:Ollama:EmbedModel"]
                    ?? cfg["OLLAMA_EMBED_MODEL"]
                    ?? Environment.GetEnvironmentVariable("OLLAMA_EMBED_MODEL")
                    ?? "nomic-embed-text";
-        var endpoint = cfg["Ai__Ollama__Endpoint"]
+        var endpoint = cfg["Ai:Ollama:Endpoint"]
                     ?? cfg["OLLAMA_ENDPOINT"]
                     ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")
                     ?? "http://ollama:11434";
