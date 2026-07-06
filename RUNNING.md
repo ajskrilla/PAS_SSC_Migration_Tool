@@ -97,9 +97,9 @@ The stack is ready when `docker compose ps` shows `db`, `api`, and `frontend` as
 (and `healthy` where a healthcheck is defined). `ollama-init` will show **exited (0)** once the
 models finish downloading — that is expected; it is a one-shot job.
 
-Confirm the API is live:
+Confirm the API is live (through the nginx proxy — the API no longer publishes a host port):
 ```bash
-curl http://localhost:8080/health/ready
+curl -k https://localhost/health/ready
 # -> {"status":"ready"}
 ```
 
@@ -109,21 +109,24 @@ curl http://localhost:8080/health/ready
 
 | What            | URL                                      |
 |-----------------|------------------------------------------|
-| **Web app**     | <http://localhost:5173>                  |
-| API health      | <http://localhost:8080/health/ready>     |
-| API (engagements)| <http://localhost:8080/api/engagements> |
-| Local AI (Ollama)| <http://localhost:11434>                |
-| PostgreSQL      | `localhost:5432` (user `pasmig`)         |
+| **Web app**     | <https://localhost> (self-signed cert — accept the browser warning; port 80 redirects here) |
+| API health      | `curl -k https://localhost/health/ready` |
+| API             | `https://localhost/api/...` (via nginx; requires login) |
+| Local AI (Ollama)| compose-internal only (`http://ollama:11434` from the api container) |
+| PostgreSQL      | compose-internal only — `docker compose exec db psql -U pasmig -d pasmig` |
 
-Open **<http://localhost:5173>** in a browser. The Overview page shows an "API ready" badge once
+Only nginx (80/443) publishes host ports. Postgres, the API, and Ollama are reachable solely on
+the compose network — nothing else on the LAN can hit them directly.
+
+Open **<https://localhost>** in a browser. The Overview page shows an "API ready" badge once
 the frontend can reach the backend.
 
 > Running on a remote VM (e.g. the Rocky server over SSH)? Either browse from the VM's own
-> desktop, or forward the ports from your workstation:
+> desktop, or forward the port from your workstation:
 > ```bash
-> ssh -L 5173:localhost:5173 -L 8080:localhost:8080 user@your-vm
+> ssh -L 8443:localhost:443 user@your-vm
 > ```
-> then open <http://localhost:5173> on your workstation.
+> then open <https://localhost:8443> on your workstation.
 
 ---
 
@@ -171,17 +174,11 @@ docker compose up -d --build db api frontend
 
 - **`docker: permission denied`** — your user isn't in the `docker` group. Run with `sudo`, or
   `sudo usermod -aG docker "$USER"` and log out/in.
-- **`address already in use` / `failed to bind host port 11434`** — a native Ollama is already
-  running on the host and holding that port. Stop it so the containerized one can bind:
-  ```bash
-  sudo systemctl stop ollama && sudo systemctl disable ollama
-  docker compose up -d
-  ```
-  (On Windows, quit the Ollama desktop app.) Or run without the AI containers: `./setup.sh --no-ai`.
-- **Port already in use** — something else is on 5173/8080/5432/11434. Stop it, or change the
-  left-hand (host) port in `docker-compose.yml`, e.g. `"5174:8080"`.
+- **Port already in use** — something else is on 80/443 (the only published ports). Stop it, or
+  change the left-hand (host) port in `docker-compose.yml`, e.g. `"8443:8443"`. A native
+  Ollama or Postgres on the host no longer conflicts — those services are compose-internal.
 - **API shows "db not ready"** — the database is still starting; wait a few seconds and retry
-  `curl http://localhost:8080/health/ready`.
+  `curl -k https://localhost/health/ready`.
 - **AI responses are slow** — expected on CPU. Set `OLLAMA_CHAT_MODEL=llama3.2:3b` in `.env` and
   run `docker compose down && docker compose up -d` to pull a smaller, faster model.
 - **Database changes not taking effect** — schema migrations only run on a fresh volume. After

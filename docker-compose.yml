@@ -10,8 +10,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
-    ports:
-      - "5432:5432"
+    # No host port: only the api container needs Postgres. For ad-hoc host access use
+    # `docker compose exec db psql -U pasmig -d pasmig`, or temporarily add
+    # `ports: ["127.0.0.1:5432:5432"]` for debugging.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pasmig -d pasmig"]
       interval: 5s
@@ -25,8 +26,9 @@ services:
     image: ollama/ollama:latest
     volumes:
       - ollama:/root/.ollama
-    ports:
-      - "11434:11434"
+    # No host port: only the api container talks to Ollama (http://ollama:11434 on the
+    # compose network). Publishing it let anyone on the LAN query or delete the models.
+    # A side benefit: a native Ollama on the host no longer conflicts with this container.
     # No GPU reservation - CPU inference. A quantized 7-8B model is the target.
     healthcheck:
       test: ["CMD", "ollama", "list"]
@@ -69,14 +71,19 @@ services:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__Postgres: "Host=db;Port=5432;Database=pasmig;Username=pasmig;Password=${POSTGRES_PASSWORD:-changeme_dev_only}"
+      # Master app secret. Signs JWTs AND derives the AES-256-GCM credential-encryption key.
+      # `:?` makes compose refuse to start (with this message) if it isn't set in .env —
+      # there is deliberately no default: a known fallback would make tokens forgeable and
+      # stored tenant credentials decryptable by anyone with the source code.
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set in .env (generate with `openssl rand -base64 48`)}
       Ai__Provider: ${AI_PROVIDER:-ollama}
       # In-container Ollama is reached by service name, not host.docker.internal.
       Ai__Ollama__Endpoint: ${OLLAMA_ENDPOINT:-http://ollama:11434}
       Ai__Ollama__ChatModel: ${OLLAMA_CHAT_MODEL:-llama3.1:8b}
       Ai__Ollama__EmbedModel: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       Ai__Ollama__GuardModel: ${OLLAMA_GUARD_MODEL:-llama-guard3:1b}
-    ports:
-      - "8080:8080"
+    # No host port: the API is reached only through the nginx reverse proxy (TLS + same-origin
+    # cookies). Publishing 8080 exposed the API on the LAN, bypassing TLS entirely.
     read_only: true
     tmpfs:
       - /tmp

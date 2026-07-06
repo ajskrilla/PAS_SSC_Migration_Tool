@@ -65,15 +65,14 @@ brings the stack up.
 
 If you'd rather not use the script:
 ```bash
-cp .env.example .env    # then edit POSTGRES_PASSWORD
+cp .env.example .env    # then edit POSTGRES_PASSWORD and set AUTH_JWT_SECRET (openssl rand -base64 48)
 docker compose up --build
 ```
 
 After it's up:
-- Frontend: http://localhost:5173
-- API health: http://localhost:8080/health/ready
-- Postgres: localhost:5432
-- Ollama (local AI): http://localhost:11434
+- Frontend: https://localhost (self-signed cert — accept the browser warning; port 80 redirects)
+- API health: `curl -k https://localhost/health/ready`
+- Postgres / Ollama: compose-internal only (no host ports); use `docker compose exec db psql -U pasmig -d pasmig` for DB access
 
 Migrations in `db/migrations/` are applied on the first start of an empty volume. To re-run
 them, remove the volume: `docker compose down -v`.

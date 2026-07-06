@@ -32,9 +32,12 @@ public sealed class CredentialEncryptionService(
 
     private byte[] DeriveKey(Guid engagementId)
     {
+        // No fallback: a known default secret would make every stored tenant credential
+        // decryptable offline by anyone with a DB dump and the source code. Program.cs
+        // validates presence at startup, so a miss here is a config bug.
         var secret = cfg["Auth__JwtSecret"]
                   ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
-                  ?? "dev-secret-change-in-production-min-32-chars!!";
+                  ?? throw new InvalidOperationException("AUTH_JWT_SECRET is not set.");
 
         // HKDF: PRK = HMAC-SHA256(salt=engagementId bytes, ikm=secret)
         // OKM = first 32 bytes → AES-256 key

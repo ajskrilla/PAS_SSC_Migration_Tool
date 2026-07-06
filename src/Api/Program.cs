@@ -79,10 +79,18 @@ builder.Services.AddHangfireServer();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddHttpContextAccessor();
 
-// JWT — read secret directly from config, no BuildServiceProvider needed
+// JWT — read secret directly from config, no BuildServiceProvider needed.
+// No fallback, deliberately: this secret signs JWTs AND derives the credential-encryption
+// key, so a known default would make tokens forgeable and stored tenant credentials
+// decryptable by anyone with the source. Fail fast instead.
 var jwtSecret = builder.Configuration["Auth__JwtSecret"]
              ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
-             ?? "dev-secret-change-in-production-min-32-chars!!";
+             ?? throw new InvalidOperationException(
+                    "AUTH_JWT_SECRET is required. Generate one (`openssl rand -base64 48`) and set it in .env. " +
+                    "NOTE: it also derives the credential-encryption key — changing it later invalidates " +
+                    "stored tenant credentials, which must then be re-entered on the Pre-migration page.");
+if (jwtSecret.Trim().Length < 32)
+    throw new InvalidOperationException("AUTH_JWT_SECRET must be at least 32 characters.");
 var jwtKey = new SymmetricSecurityKey(
     System.Text.Encoding.UTF8.GetBytes(jwtSecret));
 
@@ -109,8 +117,17 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             }
         };
     });
-builder.Services.AddAuthorization();
-builder.Services.AddAuthorization();
+// Fallback policy: every endpoint requires an authenticated user unless it carries explicit
+// authorization metadata (.AllowAnonymous() or its own .RequireAuthorization(...) policy).
+// This closes the previous gap where only the auth/admin endpoints were protected and all
+// business endpoints (migrate, revert, inventory, credentials, assistant, diagnostics) were
+// anonymous. Only login, logout, and the health probes opt out below.
+builder.Services.AddAuthorization(o =>
+{
+    o.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
 
 // In production the SPA is served same-origin through the nginx reverse proxy, so CORS
 // isn't exercised by the browser. This policy only matters for cross-origin dev (e.g.
@@ -147,13 +164,14 @@ app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Liveness/readiness. Readiness pings the DB.
-app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+// Liveness/readiness. Readiness pings the DB. Anonymous by design: docker/nginx health
+// checks and the pre-login SPA readiness probe have no session.
+app.MapGet("/health/live", () => Results.Ok(new { status = "live" })).AllowAnonymous();
 app.MapGet("/health/ready", async (IDbConnection db) =>
 {
     try { await db.ExecuteScalarAsync("SELECT 1"); return Results.Ok(new { status = "ready" }); }
     catch (Exception ex) { return Results.Problem($"db not ready: {ex.Message}"); }
-});
+}).AllowAnonymous();
 
 // First real read endpoint: list engagements (proves DB wiring end-to-end).
 app.MapGet("/api/engagements", async (PasMigration.Data.IEngagementRepository repo, CancellationToken ct) =>
@@ -531,13 +549,14 @@ app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, HttpRe
         role = result.User.Role, forcePasswordChange = result.User.ForcePasswordChange,
         engagementIds = result.User.EngagementIds,
     }});
-});
+}).AllowAnonymous();
 
+// Anonymous: a user with an expired or invalid token must still be able to clear the cookie.
 app.MapPost("/api/auth/logout", (HttpResponse response) =>
 {
     response.Cookies.Delete("auth_token");
     return Results.Ok(new { message = "Logged out." });
-});
+}).AllowAnonymous();
 
 app.MapPost("/api/auth/change-password",
     async (ChangePasswordRequest req, AuthService auth, ClaimsPrincipal user,

@@ -83,8 +83,9 @@ if [ -n "$TOTAL_GB" ]; then
 fi
 
 # ---------- 4b. Port availability ----------
-# The stack binds these host ports. The most common clash is a NATIVE Ollama install
-# already holding 11434 - that produces a cryptic "address already in use" at the very end.
+# Only the nginx frontend publishes host ports now (80 redirect + 443 TLS). Postgres,
+# the API, and Ollama are compose-network-internal, so native services on 5432/8080/11434
+# no longer conflict.
 step "Checking host ports"
 port_in_use() {
   _p="$1"
@@ -101,21 +102,13 @@ port_in_use() {
     return 1
   fi
 }
-PORTS="5432 8080 5173"
-[ "$NO_AI" -eq 0 ] && PORTS="$PORTS 11434"
+PORTS="80 443"
 PORT_CLASH=0
 for p in $PORTS; do
   if port_in_use "$p"; then
     PORT_CLASH=1
-    if [ "$p" = "11434" ]; then
-      err "Port 11434 is already in use - most likely a native Ollama service."
-      echo "    Free it so the containerized Ollama can bind it:"
-      echo "      sudo systemctl stop ollama && sudo systemctl disable ollama"
-      echo "    Then re-run this script. (Or run with --no-ai to skip the AI containers.)"
-    else
-      err "Port $p is already in use by another process."
-      echo "    Stop whatever is using it, or change the host port in docker-compose.yml."
-    fi
+    err "Port $p is already in use by another process."
+    echo "    Stop whatever is using it, or change the host port in docker-compose.yml."
   fi
 done
 if [ "$PORT_CLASH" -eq 1 ]; then
@@ -128,20 +121,46 @@ info "required host ports are free"
 step "Preparing environment file (.env)"
 if [ -f .env ]; then
   info ".env already exists - leaving it untouched"
+  # Upgrade path: older installs predate AUTH_JWT_SECRET (now mandatory). Add it if missing.
+  if ! grep -q "^AUTH_JWT_SECRET=..*" .env; then
+    if command -v openssl >/dev/null 2>&1; then
+      GENSECRET=$(openssl rand -base64 48 | tr -d '/+=')
+      # Remove an empty placeholder line if present, then append the generated value.
+      if sed --version >/dev/null 2>&1; then
+        sed -i '/^AUTH_JWT_SECRET=$/d' .env
+      else
+        sed -i '' '/^AUTH_JWT_SECRET=$/d' .env
+      fi
+      printf '\nAUTH_JWT_SECRET=%s\n' "$GENSECRET" >> .env
+      info "added generated AUTH_JWT_SECRET to existing .env (now required)"
+      warn "any previously stored tenant credentials were encrypted under the old dev secret"
+      echo "    and must be re-entered once on the Pre-migration page after startup."
+    else
+      err "existing .env lacks AUTH_JWT_SECRET and openssl is unavailable to generate one."
+      echo "    Set AUTH_JWT_SECRET (32+ random chars) in .env, then re-run."
+      exit 1
+    fi
+  fi
 else
   cp .env.example .env
-  # Generate a strong DB password instead of the placeholder.
+  # Generate a strong DB password and the mandatory app secret (AUTH_JWT_SECRET signs JWTs
+  # and derives the credential-encryption key — the stack refuses to start without it).
   if command -v openssl >/dev/null 2>&1; then
     GENPW=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)
+    GENSECRET=$(openssl rand -base64 48 | tr -d '/+=')
     # portable in-place edit (GNU + BSD sed)
     if sed --version >/dev/null 2>&1; then
       sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${GENPW}|" .env
+      sed -i "s|^AUTH_JWT_SECRET=.*|AUTH_JWT_SECRET=${GENSECRET}|" .env
     else
       sed -i '' "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${GENPW}|" .env
+      sed -i '' "s|^AUTH_JWT_SECRET=.*|AUTH_JWT_SECRET=${GENSECRET}|" .env
     fi
-    info "created .env with a generated database password"
+    info "created .env with a generated database password and app secret"
   else
-    warn "openssl not found - .env created with the placeholder password. Edit it before production use."
+    err "openssl not found - cannot generate AUTH_JWT_SECRET, which the stack requires."
+    echo "    Install openssl, or manually set AUTH_JWT_SECRET (32+ random chars) in .env."
+    exit 1
   fi
 fi
 
@@ -158,8 +177,8 @@ fi
 if [ -n "$DETACH" ]; then
   echo
   info "Stack is starting in the background."
-  echo "    Frontend:    http://localhost:5173"
-  echo "    API health:  http://localhost:8080/health/ready"
+  echo "    Frontend:    https://localhost  (self-signed cert - accept the browser warning)"
+  echo "    API health:  curl -k https://localhost/health/ready"
   echo "    Logs:        docker compose logs -f"
   echo "    Stop:        docker compose down        (keeps data)"
   echo "    Reset DB:    docker compose down -v     (wipes the database volume)"

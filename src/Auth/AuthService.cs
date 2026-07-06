@@ -169,9 +169,10 @@ public sealed class AuthService(IUserRepository users, ISettingsRepository setti
 
     public SymmetricSecurityKey GetKey()
     {
+        // No fallback: Program.cs validates this at startup, so a miss here is a config bug.
         var secret = cfg["Auth__JwtSecret"]
                   ?? Environment.GetEnvironmentVariable("AUTH_JWT_SECRET")
-                  ?? "dev-secret-change-in-production-min-32-chars!!";
+                  ?? throw new InvalidOperationException("AUTH_JWT_SECRET is not set.");
         return new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
     }
 

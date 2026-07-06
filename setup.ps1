@@ -74,6 +74,9 @@ try {
 }
 
 # ---------- 4b. Port availability ----------
+# Only the nginx frontend publishes host ports now (80 redirect + 443 TLS). Postgres,
+# the API, and Ollama are compose-network-internal, so native services on 5432/8080/11434
+# no longer conflict.
 Write-Step "Checking host ports"
 function Test-PortInUse([int]$Port) {
     try {
@@ -81,20 +84,13 @@ function Test-PortInUse([int]$Port) {
         return ($null -ne $conns)
     } catch { return $false }
 }
-$ports = @(5432, 8080, 5173)
-if (-not $NoAi) { $ports += 11434 }
+$ports = @(80, 443)
 $clash = $false
 foreach ($p in $ports) {
     if (Test-PortInUse $p) {
         $clash = $true
-        if ($p -eq 11434) {
-            Write-Err2 "Port 11434 is already in use - most likely a native Ollama service."
-            Write-Host "    Quit the Ollama app / stop the service so the container can bind it,"
-            Write-Host "    then re-run this script. (Or run with -NoAi to skip the AI containers.)"
-        } else {
-            Write-Err2 "Port $p is already in use by another process."
-            Write-Host "    Stop whatever is using it, or change the host port in docker-compose.yml."
-        }
+        Write-Err2 "Port $p is already in use by another process."
+        Write-Host "    Stop whatever is using it, or change the host port in docker-compose.yml."
     }
 }
 if ($clash) {
@@ -107,15 +103,33 @@ Write-Ok "required host ports are free"
 Write-Step "Preparing environment file (.env)"
 if (Test-Path ".env") {
     Write-Ok ".env already exists - leaving it untouched"
+    # Upgrade path: older installs predate AUTH_JWT_SECRET (now mandatory). Add it if missing.
+    $hasSecret = Select-String -Path ".env" -Pattern '^AUTH_JWT_SECRET=.+' -Quiet
+    if (-not $hasSecret) {
+        $sbytes = New-Object byte[] 48
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($sbytes)
+        $gensecret = ([Convert]::ToBase64String($sbytes) -replace '[/+=]', '')
+        (Get-Content ".env") | Where-Object { $_ -ne 'AUTH_JWT_SECRET=' } | Set-Content ".env" -Encoding UTF8
+        Add-Content ".env" "`nAUTH_JWT_SECRET=$gensecret" -Encoding UTF8
+        Write-Ok "added generated AUTH_JWT_SECRET to existing .env (now required)"
+        Write-Warn2 "any previously stored tenant credentials were encrypted under the old dev secret"
+        Write-Host "    and must be re-entered once on the Pre-migration page after startup."
+    }
 } else {
     Copy-Item ".env.example" ".env"
-    # Generate a strong DB password.
+    # Generate a strong DB password and the mandatory app secret (AUTH_JWT_SECRET signs JWTs
+    # and derives the credential-encryption key - the stack refuses to start without it).
     $bytes = New-Object byte[] 18
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $genpw = ([Convert]::ToBase64String($bytes) -replace '[/+=]', '').Substring(0, 18)
-    (Get-Content ".env") -replace '^POSTGRES_PASSWORD=.*', "POSTGRES_PASSWORD=$genpw" |
+    $sbytes = New-Object byte[] 48
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($sbytes)
+    $gensecret = ([Convert]::ToBase64String($sbytes) -replace '[/+=]', '')
+    (Get-Content ".env") `
+        -replace '^POSTGRES_PASSWORD=.*', "POSTGRES_PASSWORD=$genpw" `
+        -replace '^AUTH_JWT_SECRET=.*', "AUTH_JWT_SECRET=$gensecret" |
         Set-Content ".env" -Encoding UTF8
-    Write-Ok "created .env with a generated database password"
+    Write-Ok "created .env with a generated database password and app secret"
 }
 
 # ---------- 6. Bring the stack up ----------
@@ -133,8 +147,8 @@ if ($NoAi) {
 if (-not $Foreground) {
     Write-Host ""
     Write-Ok "Stack is starting in the background."
-    Write-Host "    Frontend:    http://localhost:5173"
-    Write-Host "    API health:  http://localhost:8080/health/ready"
+    Write-Host "    Frontend:    https://localhost  (self-signed cert - accept the browser warning)"
+    Write-Host "    API health:  curl.exe -k https://localhost/health/ready"
     Write-Host "    Logs:        docker compose logs -f"
     Write-Host "    Stop:        docker compose down        (keeps data)"
     Write-Host "    Reset DB:    docker compose down -v     (wipes the database volume)"
