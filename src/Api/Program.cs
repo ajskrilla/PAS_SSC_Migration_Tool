@@ -43,6 +43,27 @@ builder.Services.AddScoped<CredentialEncryptionService>();
 // Tracks running migration jobs so they can be aborted from the UI.
 builder.Services.AddSingleton<JobRegistry>();
 
+// AI assistant (read-only advisor, local Ollama by default). HttpClient is named "ollama" and
+// given a BaseAddress so OllamaProvider's relative-path calls (/api/chat, /api/embeddings)
+// resolve correctly; CPU inference can be slow, hence the longer timeout than the tenant client.
+builder.Services.AddHttpClient("ollama", client =>
+{
+    var endpoint = builder.Configuration["Ai__Ollama__Endpoint"]
+                ?? Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT")
+                ?? "http://ollama:11434";
+    client.BaseAddress = new Uri(endpoint);
+    client.Timeout = TimeSpan.FromMinutes(5);
+});
+// OllamaProvider registered as both its concrete type (AssistantService's constructor asks for
+// it directly) and as ILlmProvider (AssistantRouter/AssistantCatalog ask for the abstraction) —
+// same singleton instance either way, which matters for AssistantCatalog's embedding cache.
+builder.Services.AddSingleton<OllamaProvider>();
+builder.Services.AddSingleton<ILlmProvider>(sp => sp.GetRequiredService<OllamaProvider>());
+builder.Services.AddSingleton<AssistantCatalog>();
+builder.Services.AddSingleton<AssistantRouter>();
+// Scoped, not Singleton: it depends on the Scoped IDbConnection, same as the other services above.
+builder.Services.AddScoped<AssistantService>();
+
 // Resumable background jobs (migration orchestrator) backed by Postgres.
 builder.Services.AddHangfire(cfg => cfg
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
@@ -574,6 +595,39 @@ app.MapPost("/api/admin/users/{id:guid}/reset-password",
         var (ok, msg) = await auth.ResetPasswordAsync(id);
         return ok ? Results.Ok(new { message = msg }) : Results.NotFound(new { error = msg });
     }).RequireAuthorization(p => p.RequireRole("admin"));
+
+// ---- Migration Assistant (read-only AI advisor; streams SSE) ----
+// nginx has a dedicated unbuffered proxy block for exactly this path (see frontend/nginx.conf).
+app.MapPost("/api/engagements/{id:guid}/assistant",
+    async (Guid id, AssistantRequest req, AssistantService assistant, HttpContext ctx, CancellationToken ct) =>
+    {
+        ctx.Response.ContentType = "text/event-stream";
+        ctx.Response.Headers.CacheControl = "no-cache";
+        ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        try
+        {
+            await foreach (var chunk in assistant.AskStreamAsync(id, req.Question, req.History, ct))
+            {
+                await ctx.Response.WriteAsync(chunk, ct);
+                await ctx.Response.Body.FlushAsync(ct);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Client aborted (Stop button / navigated away) — nothing to send.
+        }
+        catch (Exception ex)
+        {
+            // Streaming has already started (status 200 sent), so this can't become a different
+            // HTTP status — emit it as an SSE error event instead. The frontend already has a
+            // handler for {type:"error"}.
+            var msg = "data: {\"type\":\"error\",\"message\":" +
+                      System.Text.Json.JsonSerializer.Serialize(ex.Message) + "}\n\n";
+            await ctx.Response.WriteAsync(msg, ct);
+            await ctx.Response.Body.FlushAsync(ct);
+        }
+    });
 
 app.MapGet("/api/diag/ollama", async ([FromServices] ILlmProvider llm, [FromServices] IConfiguration cfg) =>
 {
