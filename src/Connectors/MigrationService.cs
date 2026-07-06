@@ -268,25 +268,6 @@ public sealed class MigrationService(IDbConnection db, JobRegistry jobs, IPasCon
         Dictionary<string, long> folderCache, MigrationRunInput input, Guid jobId, Guid eng,
         MigrationJobResult result, CancellationToken ct)
     {
-        // Unmanage first; if it fails, bail this item -> exclusion list, keep going.
-        if (!input.DryRun)
-        {
-            try
-            {
-                await pas.UnmanageAccountAsync(si.SourceNativeId, ct);
-                await Log(eng, jobId, "api_call", si.SourceNativeId, $"unmanage '{si.Name}'", "ok");
-            }
-            catch (Exception ex)
-            {
-                result.Excluded.Add(new ExcludedItem(si.SourceNativeId, si.Name, "unmanage_failed", ex.Message));
-                result.Skipped++;
-                await SetItemStatus(eng, si, "skipped", $"unmanage failed: {ex.Message}");
-                await Log(eng, jobId, "api_call", si.SourceNativeId, $"unmanage '{si.Name}'",
-                    "excluded", ex.Message);
-                throw new MigrationSkip(); // counted as skip, not failure
-            }
-        }
-
         // Classify: local (Host) vs domain (DomainID); Windows vs Unix by ComputerClass.
         var scope = (si.Attributes.TryGetValue("AccountScope", out var sc) ? sc?.ToString() : null) ?? "local";
         var isDomain = string.Equals(scope, "domain", StringComparison.OrdinalIgnoreCase);
@@ -335,27 +316,38 @@ public sealed class MigrationService(IDbConnection db, JobRegistry jobs, IPasCon
             throw new InvalidOperationException(
                 $"Account template '{templateName}' not found on target. Create it or adjust the name.");
 
-        // Unmanage already happened above; checkout the now-static password (in memory only).
+        // Checkout the password FIRST, then unmanage. See CheckoutThenUnmanageAsync for why the
+        // order matters: unmanaging before checkout could leave an account stranded (unmanaged,
+        // but with no password ever captured) if the checkout was then refused — which is exactly
+        // what we saw in the field (PAS "Uncertain passwords" refusals on some accounts once they
+        // were unmanaged).
         string password;
         string coid;
         try
         {
-            (password, coid) = await pas.CheckoutPasswordAsync(si.SourceNativeId, ct);
+            (password, coid) = await CheckoutThenUnmanageAsync(pas, si.SourceNativeId, ct);
+            await Log(eng, jobId, "api_call", si.SourceNativeId, $"unmanage '{si.Name}'", "ok");
         }
-        catch (Exception ex)
+        catch (AccountCheckoutFailedException ex)
         {
-            // The account was ALREADY unmanaged above but we couldn't get its password, so it
-            // exists in neither a managed-PAS nor a migrated state. Flag it loudly for remediation.
-            result.Excluded.Add(new ExcludedItem(si.SourceNativeId, secretName,
-                "unmanaged_but_not_migrated",
-                $"Unmanaged in PAS but password checkout failed: {ex.Message}. " +
-                "Needs manual attention (re-manage in PAS or migrate by hand)."));
+            // Nothing changed in PAS — the account is still managed exactly as it was.
+            result.Excluded.Add(new ExcludedItem(si.SourceNativeId, secretName, "checkout_failed", ex.Message));
             result.Skipped++;
-            await SetItemStatus(eng, si, "skipped",
-                $"UNMANAGED BUT NOT MIGRATED - checkout failed: {ex.Message}");
+            await SetItemStatus(eng, si, "skipped", $"checkout failed (account still managed): {ex.Message}");
             await Log(eng, jobId, "api_call", si.SourceNativeId,
                 $"account '{secretName}'", "excluded",
-                $"UNMANAGED BUT NOT MIGRATED: {ex.Message}");
+                $"CHECKOUT FAILED (account still managed, not touched): {ex.Message}");
+            throw new MigrationSkip();
+        }
+        catch (AccountUnmanageFailedException ex)
+        {
+            // Checkout succeeded but was checked back in before this was thrown — the account
+            // remains managed in PAS. Nothing is stranded.
+            result.Excluded.Add(new ExcludedItem(si.SourceNativeId, si.Name, "unmanage_failed", ex.Message));
+            result.Skipped++;
+            await SetItemStatus(eng, si, "skipped", $"unmanage failed: {ex.Message}");
+            await Log(eng, jobId, "api_call", si.SourceNativeId, $"unmanage '{si.Name}'",
+                "excluded", ex.Message);
             throw new MigrationSkip();
         }
         try
@@ -601,8 +593,59 @@ public sealed class MigrationService(IDbConnection db, JobRegistry jobs, IPasCon
         public Dictionary<string, object?> Attributes { get; init; } = new();
     }
 
+    /// <summary>
+    /// Checks out the account's password FIRST, then unmanages the account. This order matters:
+    /// unmanaging before checkout can leave an account stranded — unmanaged, but with no password
+    /// ever captured — if the checkout is then refused (observed in the field: PAS refuses
+    /// checkout with an "Uncertain passwords" message on some accounts once they've been
+    /// unmanaged). Checking out first means a checkout failure changes nothing in PAS, and an
+    /// unmanage failure after a successful checkout is safely rolled back by checking the
+    /// password back in before either exception propagates — so the account is never left
+    /// stranded either way.
+    /// </summary>
+    public static async Task<(string Password, string CheckoutId)> CheckoutThenUnmanageAsync(
+        IPasClient pas, string accountId, CancellationToken ct)
+    {
+        string password;
+        string coid;
+        try
+        {
+            (password, coid) = await pas.CheckoutPasswordAsync(accountId, ct);
+        }
+        catch (Exception ex)
+        {
+            throw new AccountCheckoutFailedException(
+                $"PAS password checkout failed for account {accountId}: {ex.Message}", ex);
+        }
+
+        try
+        {
+            await pas.UnmanageAccountAsync(accountId, ct);
+        }
+        catch (Exception ex)
+        {
+            // Release the checkout — best effort — so a failed unmanage doesn't also leave a
+            // lingering checkout behind in PAS.
+            try { await pas.CheckinPasswordAsync(coid, ct); } catch { /* best effort */ }
+            throw new AccountUnmanageFailedException(
+                $"Unmanage failed for account {accountId} after a successful checkout " +
+                $"(checkout was checked back in): {ex.Message}", ex);
+        }
+
+        return (password, coid);
+    }
+
     private sealed class MigrationSkip : Exception { }
 }
+
+/// <summary>Thrown by <see cref="MigrationService.CheckoutThenUnmanageAsync"/> when the PAS
+/// checkout call itself failed. Nothing has changed in PAS — the account is exactly as it was.</summary>
+public sealed class AccountCheckoutFailedException(string message, Exception inner) : Exception(message, inner);
+
+/// <summary>Thrown by <see cref="MigrationService.CheckoutThenUnmanageAsync"/> when checkout
+/// succeeded but the subsequent unmanage call failed. The checkout has already been checked back
+/// in by the time this is thrown, so the account remains managed and nothing is stranded.</summary>
+public sealed class AccountUnmanageFailedException(string message, Exception inner) : Exception(message, inner);
 
 public sealed record MigrationRunInput(
     string JobType,            // text_secret | file_secret | account_unmanage_export | full
