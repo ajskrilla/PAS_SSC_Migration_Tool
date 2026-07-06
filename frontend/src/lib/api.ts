@@ -166,9 +166,14 @@ export const api = {
     credFetch(`/api/engagements/${engagementId}/credentials/clear`, { method: "POST" })
       .then(json<{ cleared: boolean }>),
 
-  logs: (engagementId: string, limit = 50, offset = 0) =>
-    credFetch(`/api/engagements/${engagementId}/logs?limit=${limit}&offset=${offset}`)
-      .then(json<LogPage>),
+  logs: (engagementId: string, limit = 50, offset = 0, q = "", eventType = "", failuresOnly = false) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (q) params.set("q", q);
+    if (eventType) params.set("eventType", eventType);
+    if (failuresOnly) params.set("failuresOnly", "true");
+    return credFetch(`/api/engagements/${engagementId}/logs?${params.toString()}`)
+      .then(json<LogPage>);
+  },
 
   runningJob: (engagementId: string) =>
     credFetch(`/api/engagements/${engagementId}/running-job`)

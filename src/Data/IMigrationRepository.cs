@@ -29,11 +29,19 @@ public interface IMigrationRepository
     /// </summary>
     Task<IEnumerable<dynamic>> GetSourceItemsAsync(Guid engagementId, string? type, string? scope, CancellationToken ct = default);
 
-    /// <summary>Total event_log count for an engagement (pagination).</summary>
-    Task<long> CountEventsAsync(Guid engagementId, CancellationToken ct = default);
+    /// <summary>Total event_log count for an engagement (pagination), with optional filters.</summary>
+    Task<long> CountEventsAsync(
+        Guid engagementId, string? search, string? eventType, bool failuresOnly, CancellationToken ct = default);
 
-    /// <summary>A page of event_log rows, newest first. Caller supplies validated limit/offset.</summary>
-    Task<IEnumerable<dynamic>> GetEventsAsync(Guid engagementId, int limit, int offset, CancellationToken ct = default);
+    /// <summary>
+    /// A page of event_log rows, newest first, with optional filters. Caller supplies validated
+    /// limit/offset. <paramref name="search"/> matches against action/outcome/message;
+    /// <paramref name="eventType"/> is an exact match (e.g. "api_call", "user_action");
+    /// <paramref name="failuresOnly"/> restricts to outcomes indicating failure.
+    /// </summary>
+    Task<IEnumerable<dynamic>> GetEventsAsync(
+        Guid engagementId, string? search, string? eventType, bool failuresOnly,
+        int limit, int offset, CancellationToken ct = default);
 
     /// <summary>The most recent running job for an engagement, or null if none is running.</summary>
     Task<dynamic?> GetRunningJobAsync(Guid engagementId, CancellationToken ct = default);
@@ -100,17 +108,55 @@ public sealed class MigrationRepository(IDbConnection db) : IMigrationRepository
         return await db.QueryAsync(new CommandDefinition(sql, new { id = engagementId, type, scope }, cancellationToken: ct));
     }
 
-    public async Task<long> CountEventsAsync(Guid engagementId, CancellationToken ct = default) =>
-        await db.ExecuteScalarAsync<long>(new CommandDefinition(
-            "SELECT COUNT(*) FROM event_log WHERE engagement_id=@id",
-            new { id = engagementId }, cancellationToken: ct));
+    public async Task<long> CountEventsAsync(
+        Guid engagementId, string? search, string? eventType, bool failuresOnly, CancellationToken ct = default)
+    {
+        var (filterSql, ps) = BuildEventFilter(engagementId, search, eventType, failuresOnly);
+        return await db.ExecuteScalarAsync<long>(new CommandDefinition(
+            $"SELECT COUNT(*) FROM event_log WHERE engagement_id=@id{filterSql}", ps, cancellationToken: ct));
+    }
 
-    public async Task<IEnumerable<dynamic>> GetEventsAsync(Guid engagementId, int limit, int offset, CancellationToken ct = default) =>
-        await db.QueryAsync(new CommandDefinition(
-            @"SELECT occurred_at, event_type, action, outcome, message, tenant_role
-              FROM event_log WHERE engagement_id=@id
-              ORDER BY occurred_at DESC LIMIT @lim OFFSET @off",
-            new { id = engagementId, lim = limit, off = offset }, cancellationToken: ct));
+    public async Task<IEnumerable<dynamic>> GetEventsAsync(
+        Guid engagementId, string? search, string? eventType, bool failuresOnly,
+        int limit, int offset, CancellationToken ct = default)
+    {
+        var (filterSql, ps) = BuildEventFilter(engagementId, search, eventType, failuresOnly);
+        ps.Add("lim", limit);
+        ps.Add("off", offset);
+        return await db.QueryAsync(new CommandDefinition(
+            $@"SELECT occurred_at, event_type, action, outcome, message, tenant_role
+               FROM event_log WHERE engagement_id=@id{filterSql}
+               ORDER BY occurred_at DESC LIMIT @lim OFFSET @off", ps, cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// Shared optional-filter SQL fragment + params for event_log queries: free-text search
+    /// across action/outcome/message, an exact event_type match, and a "failures only" heuristic
+    /// (outcome contains fail/excluded/error). Conditional string concatenation — not a runtime
+    /// <c>@param IS NULL</c> check — matching the pattern already used for optional filters in
+    /// <see cref="GetSourceItemsAsync"/>. Parameters are only added when their filter is active,
+    /// which sidesteps any null-parameter type-inference ambiguity.
+    /// </summary>
+    private static (string Sql, DynamicParameters Params) BuildEventFilter(
+        Guid engagementId, string? search, string? eventType, bool failuresOnly)
+    {
+        var ps = new DynamicParameters();
+        ps.Add("id", engagementId);
+        var sql = "";
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            sql += " AND (action ILIKE @search OR outcome ILIKE @search OR message ILIKE @search)";
+            ps.Add("search", $"%{search.Trim()}%");
+        }
+        if (!string.IsNullOrWhiteSpace(eventType))
+        {
+            sql += " AND event_type=@eventType";
+            ps.Add("eventType", eventType);
+        }
+        if (failuresOnly)
+            sql += " AND (outcome ILIKE '%fail%' OR outcome ILIKE '%excluded%' OR outcome ILIKE '%error%')";
+        return (sql, ps);
+    }
 
     public async Task<dynamic?> GetRunningJobAsync(Guid engagementId, CancellationToken ct = default) =>
         await db.QueryFirstOrDefaultAsync(new CommandDefinition(

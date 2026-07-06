@@ -453,12 +453,14 @@ app.MapGet("/api/engagements/{id:guid}/source-items",
 // Migration delta/status: how many of each item type are migrated vs pending vs failed.
 // Compares the latest source inventory against migration_item progress.
 app.MapGet("/api/engagements/{id:guid}/logs",
-    async (Guid id, PasMigration.Data.IMigrationRepository migrations, int? limit, int? offset, CancellationToken ct) =>
+    async (Guid id, PasMigration.Data.IMigrationRepository migrations,
+           int? limit, int? offset, string? q, string? eventType, bool? failuresOnly, CancellationToken ct) =>
     {
         var lim = limit is > 0 and <= 200 ? limit!.Value : 50;
         var off = offset is > 0 ? offset!.Value : 0;
-        var total = await migrations.CountEventsAsync(id, ct);
-        var rows  = await migrations.GetEventsAsync(id, lim, off, ct);
+        var failOnly = failuresOnly ?? false;
+        var total = await migrations.CountEventsAsync(id, q, eventType, failOnly, ct);
+        var rows  = await migrations.GetEventsAsync(id, q, eventType, failOnly, lim, off, ct);
         return Results.Ok(new { total, limit = lim, offset = off, rows });
     });
 

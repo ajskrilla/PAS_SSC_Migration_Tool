@@ -18,6 +18,9 @@ export function Logs() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);   // zero-based
   const [auto, setAuto] = useState(false);
+  const [search, setSearch] = useState("");
+  const [eventType, setEventType] = useState("");
+  const [failuresOnly, setFailuresOnly] = useState(false);
 
   useEffect(() => {
     api.listEngagements().then((r) => {
@@ -29,7 +32,7 @@ export function Logs() {
 
   const load = (p = page) => {
     if (!engagementId) return;
-    api.logs(engagementId, PAGE_SIZE, p * PAGE_SIZE)
+    api.logs(engagementId, PAGE_SIZE, p * PAGE_SIZE, search, eventType, failuresOnly)
       .then((res) => { setRows(res.rows); setTotal(res.total); })
       .catch(() => {});
   };
@@ -38,6 +41,13 @@ export function Logs() {
   useEffect(() => { setPage(0); load(0); /* eslint-disable-next-line */ }, [engagementId]);
   // Reload when the page changes.
   useEffect(() => { load(page); /* eslint-disable-next-line */ }, [page]);
+  // Any filter change invalidates the current page — go back to page 0. A debounce on the free-
+  // text box avoids firing a request on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => { page === 0 ? load(0) : setPage(0); }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, eventType, failuresOnly]);
 
   useEffect(() => {
     if (!auto) return;
@@ -72,8 +82,36 @@ export function Logs() {
         </label>
       </div>
 
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <div className="create-row">
+          <label className="field" style={{ flex: 2 }}>
+            <span>Search</span>
+            <input type="text" placeholder="Search action, outcome, or message…"
+              value={search} onChange={(e) => setSearch(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Type</span>
+            <select value={eventType} onChange={(e) => setEventType(e.target.value)}>
+              <option value="">All types</option>
+              <option value="api_call">API call</option>
+              <option value="user_action">User action</option>
+            </select>
+          </label>
+          <label className="check-row" style={{ alignSelf: "flex-end" }}>
+            <input type="checkbox" checked={failuresOnly} onChange={(e) => setFailuresOnly(e.target.checked)} />
+            <span>Failures only</span>
+          </label>
+        </div>
+      </div>
+
       {rows.length === 0 ? (
-        <div className="panel"><p className="muted">No log entries yet for this engagement.</p></div>
+        <div className="panel">
+          <p className="muted">
+            {search || eventType || failuresOnly
+              ? "No log entries match these filters."
+              : "No log entries yet for this engagement."}
+          </p>
+        </div>
       ) : (
         <>
           <table className="data">

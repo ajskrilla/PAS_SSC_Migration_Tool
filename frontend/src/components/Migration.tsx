@@ -47,6 +47,7 @@ export function Migration() {
   const [tplMsg, setTplMsg] = useState<string | null>(null);
   const [vaultReady, setVaultReady] = useState<{ source: boolean; target: boolean }>({ source: false, target: false });
   const [hideMigrated, setHideMigrated] = useState(false);
+  const [itemSearch, setItemSearch] = useState("");
 
   // Pick a sensible default template by name (user can override).
   const pickDefault = (opts: TemplateOption[], wanted: RegExp, exclude?: RegExp) => {
@@ -146,6 +147,24 @@ export function Migration() {
   const allSelected = items.length > 0 && selected.size === items.length;
   const toggleAll = () =>
     setSelected(allSelected ? new Set() : new Set(items.map((r) => r.source_native_id)));
+
+  // A single definition of "already migrated" reused for the badge, the hide-toggle, and the
+  // sort below, so all three can never disagree with each other.
+  const isDone = (it: SourceItemRow) =>
+    !!(it.is_migrated || it.migration_status === "succeeded" || it.migration_status === "migrated");
+
+  // Search + sort for display only — selection ("Select all"/"Deselect all") still operates on
+  // the full, unfiltered `items` list, matching its existing behavior.
+  const visibleItems = items
+    .filter((it) => !hideMigrated || !isDone(it))
+    .filter((it) => {
+      const q = itemSearch.trim().toLowerCase();
+      if (!q) return true;
+      return (it.name ?? "").toLowerCase().includes(q) || (it.folder_path ?? "").toLowerCase().includes(q);
+    })
+    // Array.prototype.sort is stable (ES2019+), so within each group the existing
+    // type/name order from the backend is preserved — this only pushes done items down.
+    .sort((a, b) => Number(isDone(a)) - Number(isDone(b)));
 
   const cred = (k: keyof MigrateConnection, v: string) => {
     // For URL fields, collapse an accidental doubled scheme (e.g. pasting https://host
@@ -356,33 +375,39 @@ export function Migration() {
               {allSelected ? "Deselect all" : "Select all"}
             </button>
           </header>
+          {items.length > 0 && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <input type="text" placeholder="Search by name or folder…"
+                value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} />
+            </div>
+          )}
           {items.length === 0 ? (
             <p className="muted">No items of this type in the latest source inventory.</p>
+          ) : visibleItems.length === 0 ? (
+            <p className="muted">No items match "{itemSearch}".</p>
           ) : (
             <div className="checklist">
-              {items
-                .filter(it => !hideMigrated || !(it.is_migrated || it.migration_status === "succeeded" || it.migration_status === "migrated"))
-                .map((it) => {
-                  const done = it.is_migrated || it.migration_status === "succeeded" || it.migration_status === "migrated";
-                  return (
-                    <label key={it.source_native_id}
-                      className={"check-row" + (done ? " check-row-done" : "")}>
-                      <input type="checkbox" checked={selected.has(it.source_native_id)}
-                        onChange={() => toggle(it.source_native_id)} />
-                      <span className="check-name">{it.name}</span>
-                      <span className="muted check-path">{it.folder_path || "—"}</span>
-                      {done && <span className="tag ok" style={{fontSize:".7rem",marginLeft:"auto"}}>✓ migrated</span>}
-                    </label>
-                  );
-                })}
+              {visibleItems.map((it) => {
+                const done = isDone(it);
+                return (
+                  <label key={it.source_native_id}
+                    className={"check-row" + (done ? " check-row-done" : "")}>
+                    <input type="checkbox" checked={selected.has(it.source_native_id)}
+                      onChange={() => toggle(it.source_native_id)} />
+                    <span className="check-name">{it.name}</span>
+                    <span className="muted check-path">{it.folder_path || "—"}</span>
+                    {done && <span className="tag ok" style={{fontSize:".7rem",marginLeft:"auto"}}>✓ migrated</span>}
+                  </label>
+                );
+              })}
             </div>
           )}
           <p className="muted note">
             {selected.size} of {items.length} selected
-            {items.some(it => it.is_migrated || it.migration_status === "succeeded") && (
+            {items.some(isDone) && (
               <button className="btn-ghost" style={{marginLeft:".75rem",fontSize:".78rem",padding:".15rem .5rem"}}
                 onClick={() => setHideMigrated(h => !h)}>
-                {hideMigrated ? `Show migrated (${items.filter(it => it.is_migrated || it.migration_status === "succeeded" || it.migration_status === "migrated").length})` : "Hide migrated"}
+                {hideMigrated ? `Show migrated (${items.filter(isDone).length})` : "Hide migrated"}
               </button>
             )}
           </p>
