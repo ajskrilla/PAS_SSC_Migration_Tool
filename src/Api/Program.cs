@@ -602,7 +602,7 @@ app.MapPost("/api/engagements/{id:guid}/assistant",
     async (Guid id, AssistantRequest req, AssistantService assistant, HttpContext ctx, CancellationToken ct) =>
     {
         ctx.Response.ContentType = "text/event-stream";
-        ctx.Response.Headers.CacheControl = "no-cache";
+        ctx.Response.Headers["Cache-Control"] = "no-cache";
         ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>()?.DisableBuffering();
 
         try
