@@ -57,7 +57,7 @@ export function Migration() {
   const loadTemplates = async () => {
     setTplMsg("Loading templates…");
     try {
-      const opts = await api.listTemplates(conn as unknown as Record<string, unknown>);
+      const opts = await api.listTemplates(conn as unknown as Record<string, unknown>, engagementId);
       setTemplates(opts);
       // Defaults: exact "Password" for text; a file-ish template for files.
       setTextTemplateId((cur) => cur || pickDefault(opts, /^password$/i) || pickDefault(opts, /password/i));
@@ -72,7 +72,7 @@ export function Migration() {
     setTplMsg("Creating file template…");
     try {
       const created = await api.createFileTemplate(
-        conn as unknown as Record<string, unknown>, "Migration File Template");
+        conn as unknown as Record<string, unknown>, "Migration File Template", engagementId);
       setTplMsg(`Created "${created.name}" (#${created.id}).`);
       await loadTemplates();          // refresh the list
       setFileTemplateId(created.id);  // and select the new one
@@ -304,7 +304,8 @@ export function Migration() {
           <header className="page-head" style={{ marginBottom: 10 }}>
             <h2 style={{ margin: 0 }}>Target templates</h2>
             <button className="btn ghost small" onClick={loadTemplates}
-              disabled={!conn.ssClientId || !conn.ssClientSecret}>
+              disabled={!vaultReady.target}
+              title={vaultReady.target ? "" : "Target credentials not loaded — check Pre-migration"}>
               Load templates
             </button>
           </header>
@@ -332,7 +333,8 @@ export function Migration() {
                 </select>
                 <button className="btn ghost small" style={{ marginTop: 6 }}
                   onClick={createFileTemplate}
-                  disabled={!conn.ssClientId || !conn.ssClientSecret}>
+                  disabled={!vaultReady.target}
+                  title={vaultReady.target ? "" : "Target credentials not loaded — check Pre-migration"}>
                   Create file template
                 </button>
               </label>

@@ -182,7 +182,7 @@ export const api = {
     credFetch(`/api/engagements/${engagementId}/migration-status`)
       .then(json<MigrationStatus>),
 
-  listTemplates: (conn: Record<string, unknown>) =>
+  listTemplates: (conn: Record<string, unknown>, engagementId?: string) =>
     credFetch(`/api/templates`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -194,10 +194,12 @@ export const api = {
         secretServerBaseUrl: conn.ssSecretServerBaseUrl,
         clientId: conn.ssClientId,
         clientSecret: conn.ssClientSecret,
+        engagementId,
+        role: "target",
       }),
     }).then(json<TemplateOption[]>),
 
-  createFileTemplate: (conn: Record<string, unknown>, name: string) =>
+  createFileTemplate: (conn: Record<string, unknown>, name: string, engagementId?: string) =>
     credFetch(`/api/templates/create-file`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -210,6 +212,8 @@ export const api = {
           secretServerBaseUrl: conn.ssSecretServerBaseUrl,
           clientId: conn.ssClientId,
           clientSecret: conn.ssClientSecret,
+          engagementId,
+          role: "target",
         },
         name,
       }),

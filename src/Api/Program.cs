@@ -299,15 +299,61 @@ app.MapGet("/api/engagements/{id:guid}/reconciliation",
 
 // Run a migration job (text_secret | file_secret | account_unmanage_export | full).
 app.MapPost("/api/templates/create-file",
-    async (CreateFileTemplateRequest req, ConnectionService svc, CancellationToken ct) =>
+    async (CreateFileTemplateRequest req, ConnectionService svc,
+           CredentialVault vault, CredentialEncryptionService enc, CancellationToken ct) =>
     {
-        try { return Results.Ok(await svc.CreateFileTemplateAsync(req.Connection, req.Name, ct)); }
+        var conn = req.Connection;
+        if (conn.EngagementId is { } eng && conn.Role is { } role)
+        {
+            if (!vault.Has(eng, role))
+                await enc.LoadIntoVaultAsync(eng, vault, ct);
+            var stored = vault.Get(eng, role);
+            if (stored is not null)
+            {
+                conn = conn with
+                {
+                    BaseUrl             = stored.BaseUrl ?? conn.BaseUrl,
+                    PlatformBaseUrl     = stored.PlatformBaseUrl ?? conn.PlatformBaseUrl,
+                    SecretServerBaseUrl = stored.SecretServerBaseUrl ?? conn.SecretServerBaseUrl,
+                    AppId               = stored.AppId ?? conn.AppId,
+                    ClientId            = stored.ClientId.Length > 0 ? stored.ClientId : conn.ClientId,
+                    ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : conn.ClientSecret,
+                    Username            = stored.Username ?? conn.Username,
+                    Scope               = stored.Scope ?? conn.Scope,
+                };
+            }
+        }
+        try { return Results.Ok(await svc.CreateFileTemplateAsync(conn, req.Name, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     });
 
 app.MapPost("/api/templates",
-    async (TestConnectionInput input, ConnectionService svc, CancellationToken ct) =>
+    async (TestConnectionInput input, ConnectionService svc,
+           CredentialVault vault, CredentialEncryptionService enc, CancellationToken ct) =>
     {
+        // The frontend only ever has a masked placeholder for a credential loaded from
+        // Pre-migration — never the real secret — so it sends engagementId+role and relies
+        // on the server to resolve the rest from the vault, same as /migrate and /inventory/run.
+        if (input.EngagementId is { } eng && input.Role is { } role)
+        {
+            if (!vault.Has(eng, role))
+                await enc.LoadIntoVaultAsync(eng, vault, ct);
+            var stored = vault.Get(eng, role);
+            if (stored is not null)
+            {
+                input = input with
+                {
+                    BaseUrl             = stored.BaseUrl ?? input.BaseUrl,
+                    PlatformBaseUrl     = stored.PlatformBaseUrl ?? input.PlatformBaseUrl,
+                    SecretServerBaseUrl = stored.SecretServerBaseUrl ?? input.SecretServerBaseUrl,
+                    AppId               = stored.AppId ?? input.AppId,
+                    ClientId            = stored.ClientId.Length > 0 ? stored.ClientId : input.ClientId,
+                    ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : input.ClientSecret,
+                    Username            = stored.Username ?? input.Username,
+                    Scope               = stored.Scope ?? input.Scope,
+                };
+            }
+        }
         try { return Results.Ok(await svc.ListTemplatesAsync(input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     });
