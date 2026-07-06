@@ -41,6 +41,8 @@ builder.Services.AddSingleton<PasMigration.Connectors.ISecretServerConnectorFact
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Encrypts credentials for persistence across restarts.
 builder.Services.AddScoped<CredentialEncryptionService>();
+// Resolves stored credentials into request inputs (vault auto-load + stored-over-sent merge).
+builder.Services.AddScoped<CredentialResolver>();
 // Tracks running migration jobs so they can be aborted from the UI.
 builder.Services.AddSingleton<JobRegistry>();
 
@@ -293,32 +295,11 @@ app.MapPost("/api/engagements/{id:guid}/credentials/clear",
 // Run a full inventory capture for one tenant role using session credentials.
 app.MapPost("/api/engagements/{id:guid}/inventory/run",
     async (Guid id, RunInventoryInput input, InventoryService svc,
-           CredentialVault vault, CredentialEncryptionService enc,
-           CancellationToken ct) =>
+           CredentialResolver creds, CancellationToken ct) =>
     {
-        // Auto-load persisted credentials if vault is empty (e.g. after restart) — mirrors
-        // /migrate so "Run inventory" works without re-entering the secret every time.
-        if (!vault.Has(id, input.Role))
-            await enc.LoadIntoVaultAsync(id, vault, ct);
-
-        // Merge stored credentials into input — the frontend may send blank credential
-        // fields once they're already stored server-side for this role.
-        var stored = vault.Get(id, input.Role);
-        if (stored is not null)
-        {
-            input = input with
-            {
-                BaseUrl             = stored.BaseUrl ?? input.BaseUrl,
-                PlatformBaseUrl     = stored.PlatformBaseUrl ?? input.PlatformBaseUrl,
-                SecretServerBaseUrl = stored.SecretServerBaseUrl ?? input.SecretServerBaseUrl,
-                AppId               = stored.AppId ?? input.AppId,
-                ClientId            = stored.ClientId.Length > 0 ? stored.ClientId : input.ClientId,
-                ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : input.ClientSecret,
-                Username            = stored.Username ?? input.Username,
-                Scope               = stored.Scope ?? input.Scope,
-            };
-        }
-
+        // Merge stored credentials for the requested role (auto-loading persisted ciphertext
+        // after a restart) — the frontend sends blank credential fields once they're stored.
+        input = await creds.MergeAsync(id, input, ct);
         try { return Results.Ok(await svc.CaptureAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     }).RequireAuthorization("OperatorWrite");
@@ -369,93 +350,30 @@ app.MapGet("/api/engagements/{id:guid}/reconciliation",
 // Run a migration job (text_secret | file_secret | account_unmanage_export | full).
 app.MapPost("/api/templates/create-file",
     async (CreateFileTemplateRequest req, ConnectionService svc,
-           CredentialVault vault, CredentialEncryptionService enc, CancellationToken ct) =>
+           CredentialResolver creds, CancellationToken ct) =>
     {
-        var conn = req.Connection;
-        if (conn.EngagementId is { } eng && conn.Role is { } role)
-        {
-            if (!vault.Has(eng, role))
-                await enc.LoadIntoVaultAsync(eng, vault, ct);
-            var stored = vault.Get(eng, role);
-            if (stored is not null)
-            {
-                conn = conn with
-                {
-                    BaseUrl             = stored.BaseUrl ?? conn.BaseUrl,
-                    PlatformBaseUrl     = stored.PlatformBaseUrl ?? conn.PlatformBaseUrl,
-                    SecretServerBaseUrl = stored.SecretServerBaseUrl ?? conn.SecretServerBaseUrl,
-                    AppId               = stored.AppId ?? conn.AppId,
-                    ClientId            = stored.ClientId.Length > 0 ? stored.ClientId : conn.ClientId,
-                    ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : conn.ClientSecret,
-                    Username            = stored.Username ?? conn.Username,
-                    Scope               = stored.Scope ?? conn.Scope,
-                };
-            }
-        }
+        var conn = await creds.MergeAsync(req.Connection, ct);
         try { return Results.Ok(await svc.CreateFileTemplateAsync(conn, req.Name, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     }).RequireAuthorization("OperatorWrite");
 
 app.MapPost("/api/templates",
     async (TestConnectionInput input, ConnectionService svc,
-           CredentialVault vault, CredentialEncryptionService enc, CancellationToken ct) =>
+           CredentialResolver creds, CancellationToken ct) =>
     {
-        // The frontend only ever has a masked placeholder for a credential loaded from
-        // Pre-migration — never the real secret — so it sends engagementId+role and relies
-        // on the server to resolve the rest from the vault, same as /migrate and /inventory/run.
-        if (input.EngagementId is { } eng && input.Role is { } role)
-        {
-            if (!vault.Has(eng, role))
-                await enc.LoadIntoVaultAsync(eng, vault, ct);
-            var stored = vault.Get(eng, role);
-            if (stored is not null)
-            {
-                input = input with
-                {
-                    BaseUrl             = stored.BaseUrl ?? input.BaseUrl,
-                    PlatformBaseUrl     = stored.PlatformBaseUrl ?? input.PlatformBaseUrl,
-                    SecretServerBaseUrl = stored.SecretServerBaseUrl ?? input.SecretServerBaseUrl,
-                    AppId               = stored.AppId ?? input.AppId,
-                    ClientId            = stored.ClientId.Length > 0 ? stored.ClientId : input.ClientId,
-                    ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : input.ClientSecret,
-                    Username            = stored.Username ?? input.Username,
-                    Scope               = stored.Scope ?? input.Scope,
-                };
-            }
-        }
+        // The frontend only ever has a masked placeholder for a stored credential — never the
+        // real secret — so it sends engagementId+role and the resolver supplies the rest.
+        input = await creds.MergeAsync(input, ct);
         try { return Results.Ok(await svc.ListTemplatesAsync(input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     }).RequireAuthorization("OperatorWrite");
 
 app.MapPost("/api/engagements/{id:guid}/migrate",
     async (Guid id, MigrationRunInput input, MigrationService svc,
-           CredentialVault vault, CredentialEncryptionService enc,
-           CancellationToken ct) =>
+           CredentialResolver creds, CancellationToken ct) =>
     {
-        // Auto-load persisted credentials if vault is empty (e.g. after restart).
-        if (!vault.Has(id, "source") || !vault.Has(id, "target"))
-            await enc.LoadIntoVaultAsync(id, vault, ct);
-
-        // Merge vault credentials into input — frontend sends metadata only (no secrets).
-        var src = vault.Get(id, "source");
-        var tgt = vault.Get(id, "target");
-        if (src is not null || tgt is not null)
-        {
-            input = input with
-            {
-                PasBaseUrl      = src?.BaseUrl ?? src?.PlatformBaseUrl ?? input.PasBaseUrl,
-                PasAppId        = src?.AppId   ?? input.PasAppId,
-                PasClientId     = src?.ClientId.Length > 0 ? src.ClientId : input.PasClientId,
-                PasClientSecret = src?.ClientSecret.Length > 0 ? src.ClientSecret : input.PasClientSecret,
-                PasScope        = src?.Scope   ?? input.PasScope,
-                SsBaseUrl           = tgt?.BaseUrl ?? input.SsBaseUrl,
-                SsPlatformBaseUrl   = tgt?.PlatformBaseUrl ?? input.SsPlatformBaseUrl,
-                SsSecretServerBaseUrl = tgt?.SecretServerBaseUrl ?? input.SsSecretServerBaseUrl,
-                SsClientId      = tgt?.ClientId.Length > 0 ? tgt.ClientId : input.SsClientId,
-                SsClientSecret  = tgt?.ClientSecret.Length > 0 ? tgt.ClientSecret : input.SsClientSecret,
-            };
-        }
-
+        // Merge both roles' stored credentials — frontend sends metadata only (no secrets).
+        input = await creds.MergeAsync(id, input, ct);
         try { return Results.Ok(await svc.RunAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     }).RequireAuthorization("OperatorWrite");
@@ -463,30 +381,14 @@ app.MapPost("/api/engagements/{id:guid}/migrate",
 // Revert: delete tool-created target items (lab testing). Requires explicit confirm=true.
 app.MapPost("/api/engagements/{id:guid}/revert",
     async (Guid id, RevertRequest req, MigrationService svc,
-           CredentialVault vault, CredentialEncryptionService enc, IDbConnection db,
-           CancellationToken ct) =>
+           CredentialResolver creds, CancellationToken ct) =>
     {
         if (!req.Confirm)
             return Results.BadRequest(new { message = "Revert requires confirm=true. This deletes migrated target data." });
-        // Auto-load and merge vault credentials for revert too.
-        if (!vault.Has(id, "source") || !vault.Has(id, "target"))
-            await enc.LoadIntoVaultAsync(id, vault, ct);
-        var src = vault.Get(id, "source");
-        var tgt = vault.Get(id, "target");
-        var conn = req.Connection;
-        if (src is not null || tgt is not null)
-        {
-            conn = conn with
-            {
-                PasBaseUrl      = src?.BaseUrl ?? src?.PlatformBaseUrl ?? conn.PasBaseUrl,
-                PasClientId     = src?.ClientId.Length > 0 ? src.ClientId : conn.PasClientId,
-                PasClientSecret = src?.ClientSecret.Length > 0 ? src.ClientSecret : conn.PasClientSecret,
-                SsPlatformBaseUrl   = tgt?.PlatformBaseUrl ?? conn.SsPlatformBaseUrl,
-                SsSecretServerBaseUrl = tgt?.SecretServerBaseUrl ?? conn.SsSecretServerBaseUrl,
-                SsClientId      = tgt?.ClientId.Length > 0 ? tgt.ClientId : conn.SsClientId,
-                SsClientSecret  = tgt?.ClientSecret.Length > 0 ? tgt.ClientSecret : conn.SsClientSecret,
-            };
-        }
+        // Same dual-role merge as /migrate. Alignment note: revert's previous inline copy had
+        // drifted to a subset of fields (it skipped PasAppId, PasScope, SsBaseUrl); it now
+        // receives the full set — strictly more stored metadata, fields it doesn't use are ignored.
+        var conn = await creds.MergeAsync(id, req.Connection, ct);
         try { return Results.Ok(await svc.RevertAsync(id, conn, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     }).RequireAuthorization("OperatorWrite");
