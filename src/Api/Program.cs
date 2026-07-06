@@ -61,6 +61,7 @@ builder.Services.AddSingleton<OllamaProvider>();
 builder.Services.AddSingleton<ILlmProvider>(sp => sp.GetRequiredService<OllamaProvider>());
 builder.Services.AddSingleton<AssistantCatalog>();
 builder.Services.AddSingleton<AssistantRouter>();
+builder.Services.AddSingleton<ContentGuard>();
 // Scoped, not Singleton: it depends on the Scoped IDbConnection, same as the other services above.
 builder.Services.AddScoped<AssistantService>();
 

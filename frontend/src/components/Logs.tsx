@@ -95,6 +95,7 @@ export function Logs() {
               <option value="">All types</option>
               <option value="api_call">API call</option>
               <option value="user_action">User action</option>
+              <option value="ai_safety">AI safety</option>
             </select>
           </label>
           <label className="check-row" style={{ alignSelf: "flex-end" }}>

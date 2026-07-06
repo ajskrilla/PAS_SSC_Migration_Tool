@@ -142,6 +142,7 @@ public sealed class AssistantRouter(ILlmProvider provider, AssistantCatalog cata
 public sealed class AssistantService(
     OllamaProvider ollama,
     AssistantRouter router,
+    ContentGuard guard,
     IDbConnection db,
     ILogger<AssistantService> log)
 {
@@ -242,6 +243,19 @@ public sealed class AssistantService(
         }
 
         // Phase 3b: LLM narration — for open-ended questions and environment_summary
+        yield return Phase("safety_check", "Checking input safety...");
+        var promptVerdict = await guard.CheckPromptAsync(question, ct);
+        if (!promptVerdict.Safe)
+        {
+            await LogSafetyEventAsync(engagementId,
+                "unsafe input - blocked", promptVerdict.Category, question, ct);
+            yield return Token(
+                "I can't help with that request — it was flagged by the content safety filter. " +
+                "If you believe this is a mistake, contact your administrator.");
+            yield return Done();
+            yield break;
+        }
+
         yield return Phase("generating", "Generating response (CPU model)...");
 
 
@@ -269,13 +283,57 @@ public sealed class AssistantService(
 
         messages.Add(new(ChatRole.User, userMessage));
 
+        var fullAnswer = new System.Text.StringBuilder();
         await foreach (var token in ollama.ChatStreamAsync(messages, ct))
         {
             if (ct.IsCancellationRequested) yield break;
+            fullAnswer.Append(token);
             yield return Token(token);
         }
 
+        // Output-side check runs AFTER the full answer has already streamed to the browser —
+        // by design (see ContentGuard's doc comment): this is a background safety-net audit for
+        // review, not a pre-display gate. A pre-display gate would require buffering the entire
+        // answer before showing any of it, which trades away the live-typing streaming UX this
+        // was built around. This still has to be awaited rather than fired-and-forgotten, though:
+        // AssistantService is request-scoped, and its IDbConnection would be disposed once the
+        // request ends, so an unawaited background write here could silently fail.
+        var answerVerdict = await guard.CheckResponseAsync(question, fullAnswer.ToString(), ct);
+        if (!answerVerdict.Safe)
+            await LogSafetyEventAsync(engagementId,
+                "unsafe output - flagged for review", answerVerdict.Category, fullAnswer.ToString(), ct);
+
         yield return Done();
+    }
+
+    /// <summary>
+    /// Records a content-guard verdict to event_log (event_type "ai_safety") so flagged input/
+    /// output shows up in the Logs page like any other event — searchable and filterable there
+    /// rather than needing a separate review surface. Best-effort: a logging failure here must
+    /// never break the assistant response itself.
+    /// </summary>
+    private async Task LogSafetyEventAsync(
+        Guid engagementId, string outcome, string? category, string content, CancellationToken ct)
+    {
+        try
+        {
+            const int maxLen = 500;
+            var snippet = content.Length > maxLen ? content[..maxLen] + "…" : content;
+            await db.ExecuteAsync(new CommandDefinition(
+                @"INSERT INTO event_log (engagement_id, event_type, action, outcome, message)
+                  VALUES (@Eng, 'ai_safety', 'content guard', @Outcome, @Message)",
+                new
+                {
+                    Eng = engagementId,
+                    Outcome = category is null ? outcome : $"{outcome} ({category})",
+                    Message = snippet,
+                },
+                cancellationToken: ct));
+        }
+        catch (Exception ex)
+        {
+            log.LogError("Failed to record content-guard event: {Message}", ex.Message);
+        }
     }
 
     // ── SSE helpers ───────────────────────────────────────────────────────────────────

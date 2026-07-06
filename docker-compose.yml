@@ -35,7 +35,7 @@ services:
       retries: 12
     restart: unless-stopped
 
-  # One-shot: pulls the chat + embedding models on first run, then exits.
+  # One-shot: pulls the chat + embedding + safety-guard models on first run, then exits.
   ollama-init:
     image: ollama/ollama:latest
     depends_on:
@@ -45,6 +45,7 @@ services:
       OLLAMA_HOST: http://ollama:11434
       CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-llama3.1:8b}
       EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      GUARD_MODEL: ${OLLAMA_GUARD_MODEL:-llama-guard3:1b}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -52,6 +53,8 @@ services:
         ollama pull "$$CHAT_MODEL";
         echo "Pulling embedding model: $$EMBED_MODEL";
         ollama pull "$$EMBED_MODEL";
+        echo "Pulling safety guard model: $$GUARD_MODEL";
+        ollama pull "$$GUARD_MODEL";
         echo "Model pull complete.";
     restart: "no"
 
@@ -71,6 +74,7 @@ services:
       Ai__Ollama__Endpoint: ${OLLAMA_ENDPOINT:-http://ollama:11434}
       Ai__Ollama__ChatModel: ${OLLAMA_CHAT_MODEL:-llama3.1:8b}
       Ai__Ollama__EmbedModel: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      Ai__Ollama__GuardModel: ${OLLAMA_GUARD_MODEL:-llama-guard3:1b}
     ports:
       - "8080:8080"
     read_only: true
