@@ -38,6 +38,40 @@ export interface TestConnectionInput {
   role?: "source" | "target";
 }
 
+// Identity provider (SSO) config as returned by /api/admin/identity-providers.
+// The client secret is write-only: responses only carry hasClientSecret.
+export interface IdentityProvider {
+  id: string;
+  name: string;
+  slug: string;
+  type: string;
+  authority: string;
+  clientId: string;
+  hasClientSecret: boolean;
+  enabled: boolean;
+  jitProvisioning: boolean;
+  defaultRole: string;
+  allowedEmailDomains: string[];
+  roleClaim: string | null;
+  roleMappingsJson: string | null;
+  createdAt: string;
+}
+
+// Create/update payload. clientSecret: omit (or empty) on update to keep the stored secret.
+export interface IdentityProviderInput {
+  name: string;
+  slug: string;
+  authority: string;
+  clientId: string;
+  clientSecret?: string;
+  enabled: boolean;
+  jitProvisioning: boolean;
+  defaultRole: string;
+  allowedEmailDomains?: string[];
+  roleClaim?: string;
+  roleMappingsJson?: string;
+}
+
 // All API calls include credentials (httpOnly JWT cookie) for auth.
 function credFetch(url: string, opts: RequestInit = {}): Promise<Response> {
   return fetch(url, { ...opts, credentials: "include" });
@@ -176,6 +210,27 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionTimeoutHours }),
     }).then(json<{ message: string }>),
+
+  listIdentityProviders: () =>
+    credFetch(`/api/admin/identity-providers`).then(json<IdentityProvider[]>),
+
+  createIdentityProvider: (input: IdentityProviderInput) =>
+    credFetch(`/api/admin/identity-providers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }).then(json<{ id: string }>),
+
+  updateIdentityProvider: (id: string, input: IdentityProviderInput) =>
+    credFetch(`/api/admin/identity-providers/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }).then(json<{ id: string }>),
+
+  deleteIdentityProvider: (id: string) =>
+    credFetch(`/api/admin/identity-providers/${id}`, { method: "DELETE" })
+      .then(json<{ deleted: boolean }>),
 
   logs: (engagementId: string, limit = 50, offset = 0, q = "", eventType = "", failuresOnly = false) => {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
