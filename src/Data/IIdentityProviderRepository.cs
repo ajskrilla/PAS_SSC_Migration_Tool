@@ -4,11 +4,30 @@ using Dapper;
 namespace PasMigration.Data;
 
 /// <summary>A configured identity provider row. ClientSecretEnc is AES-256-GCM ciphertext
-/// (see <c>IdpSecretProtector</c>) and must never leave the server decrypted or otherwise.</summary>
-public sealed record IdentityProviderRow(
-    Guid Id, string Name, string Slug, string Type, string Authority, string ClientId,
-    byte[]? ClientSecretEnc, bool Enabled, bool JitProvisioning, string DefaultRole,
-    string[] AllowedEmailDomains, string? RoleClaim, string? RoleMappingsJson, DateTime CreatedAt);
+/// (see <c>IdpSecretProtector</c>) and must never leave the server decrypted or otherwise.
+///
+/// Deliberately property-based, NOT a positional record: Dapper's constructor mapping
+/// requires the reader's reported field type to match each parameter exactly, and Npgsql
+/// reports the <c>text[]</c> column (<c>allowed_email_domains</c>) as <c>System.Array</c>,
+/// which fails to match a <c>string[]</c> parameter ("no matching signature" at runtime).
+/// Property mapping assigns the actual value — a real <c>string[]</c> — so it works.</summary>
+public sealed record IdentityProviderRow
+{
+    public Guid     Id                  { get; set; }
+    public string   Name                { get; set; } = "";
+    public string   Slug                { get; set; } = "";
+    public string   Type                { get; set; } = "";
+    public string   Authority           { get; set; } = "";
+    public string   ClientId            { get; set; } = "";
+    public byte[]?  ClientSecretEnc     { get; set; }
+    public bool     Enabled             { get; set; }
+    public bool     JitProvisioning     { get; set; }
+    public string   DefaultRole         { get; set; } = "viewer";
+    public string[] AllowedEmailDomains { get; set; } = [];
+    public string?  RoleClaim           { get; set; }
+    public string?  RoleMappingsJson    { get; set; }
+    public DateTime CreatedAt           { get; set; }
+}
 
 /// <summary>Writable fields for insert/update — everything except id, type, and the secret,
 /// which are handled explicitly by the callers.</summary>
