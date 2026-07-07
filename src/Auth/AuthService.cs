@@ -80,9 +80,13 @@ public sealed class AuthService(IUserRepository users, ISettingsRepository setti
             return (false, "Password must contain uppercase, lowercase, a number, and a special character.");
 
         var hash = await users.GetPasswordHashAsync(userId, ct);
-        if (hash is null) return (false, "User not found.");
+        // Null covers user-not-found and (future SSO) password-less accounts; empty covers a
+        // corrupt row. Neither may pass a current-password check or set a password here —
+        // previously an EMPTY hash skipped verification entirely (the empty-hash bypass).
+        if (string.IsNullOrEmpty(hash))
+            return (false, "Password login is not available for this account.");
 
-        if (!string.IsNullOrEmpty(hash) && !BCrypt.Net.BCrypt.Verify(req.CurrentPassword, hash))
+        if (!BCrypt.Net.BCrypt.Verify(req.CurrentPassword, hash))
             return (false, "Current password is incorrect.");
 
         var newHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword, BcryptCost);

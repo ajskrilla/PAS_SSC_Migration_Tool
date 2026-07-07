@@ -178,4 +178,36 @@ public class AuthServiceTests
         Assert.StartsWith("$2", repo.LastSetPassword!.Value.Hash);
         Assert.DoesNotContain("BrandNewValid9!", repo.LastSetPassword!.Value.Hash);
     }
+
+    [Fact]
+    public async Task ChangePassword_rejects_empty_stored_hash()
+    {
+        // Regression guard for the empty-hash bypass: an empty stored hash previously SKIPPED
+        // current-password verification entirely, letting anyone set a password on such a row.
+        var repo = new FakeUserRepository { SeededHashById = "" };
+        var svc  = MakeService(repo);
+
+        var (ok, err) = await svc.ChangePasswordAsync(Guid.NewGuid(),
+            new ChangePasswordRequest("anything", "BrandNewValid9!"));
+
+        Assert.False(ok);
+        Assert.NotNull(err);
+        Assert.Null(repo.LastSetPassword);              // nothing persisted
+    }
+
+    [Fact]
+    public async Task ChangePassword_rejects_null_stored_hash()
+    {
+        // Null hash = user not found today, and password-less SSO-only accounts once SSO lands.
+        // Neither may set a local password through the change-password path.
+        var repo = new FakeUserRepository { SeededHashById = null };
+        var svc  = MakeService(repo);
+
+        var (ok, err) = await svc.ChangePasswordAsync(Guid.NewGuid(),
+            new ChangePasswordRequest("anything", "BrandNewValid9!"));
+
+        Assert.False(ok);
+        Assert.NotNull(err);
+        Assert.Null(repo.LastSetPassword);
+    }
 }

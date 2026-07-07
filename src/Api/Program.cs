@@ -11,6 +11,9 @@ using PasMigration.Ai;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Security.Claims;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.HttpOverrides;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -153,6 +156,29 @@ var corsOrigins = (builder.Configuration["Cors:Origins"] ?? "http://localhost:51
 builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
     p.WithOrigins(corsOrigins).AllowAnyHeader().AllowAnyMethod()));
 
+// Login rate limiting: 5 attempts per minute per client IP, no queueing. BCrypt makes each
+// guess slow; this stops sustained online guessing outright. The partition key relies on
+// X-Forwarded-For from nginx (see UseForwardedHeaders below) — without it every client would
+// share the proxy's IP and one attacker could lock the door for everyone.
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.OnRejected = async (ctx, ct) =>
+    {
+        ctx.HttpContext.Response.ContentType = "application/json";
+        await ctx.HttpContext.Response.WriteAsync(
+            "{\"error\":\"Too many login attempts. Try again in a minute.\"}", ct);
+    };
+    o.AddPolicy("login", ctx => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 5,
+            Window      = TimeSpan.FromMinutes(1),
+            QueueLimit  = 0,
+        }));
+});
+
 var app = builder.Build();
 
 // Idempotent schema fixups applied at startup (the docker-entrypoint-initdb.d migrations only
@@ -176,9 +202,23 @@ catch (Exception ex)
     app.Logger.LogWarning("Startup schema fixup skipped: {Message}", ex.Message);
 }
 
+// Honor X-Forwarded-For / X-Forwarded-Proto from nginx so RemoteIpAddress is the real
+// client (rate-limit partitioning) and Request.IsHttps reflects the TLS front door.
+// Trusting any immediate proxy is safe HERE because the API publishes no host port —
+// it is reachable only through nginx on the compose network (port lockdown, July 2026).
+// If a host port mapping is ever reintroduced, this trust must be revisited.
+var fwd = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+};
+fwd.KnownNetworks.Clear();
+fwd.KnownProxies.Clear();
+app.UseForwardedHeaders(fwd);
+
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 // Liveness/readiness. Readiness pings the DB. Anonymous by design: docker/nginx health
 // checks and the pre-login SPA readiness probe have no session.
@@ -470,7 +510,7 @@ app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, HttpRe
         return Results.Json(new { error = result.Error }, statusCode: 401);
     response.Cookies.Append("auth_token", result.Token!, new CookieOptions
     {
-        HttpOnly = true, Secure = false, SameSite = SameSiteMode.Strict,
+        HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict,
         Expires = result.Expires,
     });
     return Results.Ok(new { user = new {
@@ -479,7 +519,7 @@ app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, HttpRe
         role = result.User.Role, forcePasswordChange = result.User.ForcePasswordChange,
         engagementIds = result.User.EngagementIds,
     }});
-}).AllowAnonymous();
+}).AllowAnonymous().RequireRateLimiting("login");
 
 // Anonymous: a user with an expired or invalid token must still be able to clear the cookie.
 app.MapPost("/api/auth/logout", (HttpResponse response) =>
@@ -504,7 +544,7 @@ app.MapPost("/api/auth/change-password",
             var (newToken, expires) = await auth.GenerateTokenAsync(updated, ct);
             response.Cookies.Append("auth_token", newToken, new CookieOptions
             {
-                HttpOnly = true, Secure = false, SameSite = SameSiteMode.Strict,
+                HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict,
                 Expires = expires,
             });
         }
