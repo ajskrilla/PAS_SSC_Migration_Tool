@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.HttpOverrides;
 
@@ -86,6 +87,7 @@ builder.Services.AddHangfireServer();
 // App-level auth (OIDC/JWT). Configuration supplied via env in real deployments.
 // Auth services
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<IExternalIdentityService, ExternalIdentityService>();
 builder.Services.AddHttpContextAccessor();
 
 // JWT — read secret directly from config, no BuildServiceProvider needed.
@@ -126,6 +128,81 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             }
         };
     });
+
+// ── SSO: register one OIDC authentication scheme per enabled provider (from the DB) ─────
+// Startup-time registration (design phase 2): adding or enabling a provider requires an api
+// restart; dynamic scheme reload is a later phase. If the DB is unreachable here, SSO scheme
+// registration is skipped with a warning and local password login remains fully functional.
+// The built-in OpenIdConnect handler does ALL protocol validation (issuer, audience, nonce,
+// PKCE, signing keys via metadata discovery) — we write none of it.
+var ssoRegistry = new SsoSchemeRegistry();
+builder.Services.AddSingleton(ssoRegistry);
+try
+{
+    using var ssoDb = new NpgsqlConnection(connString);
+    var ssoProviders = ssoDb.Query<(Guid Id, string Slug, string Authority, string ClientId, byte[]? SecretEnc)>(
+        "SELECT id, slug, authority, client_id, client_secret_enc FROM identity_provider WHERE enabled AND type = 'oidc'")
+        .ToList();
+
+    if (ssoProviders.Count > 0)
+    {
+        var ssoProtector = new IdpSecretProtector(builder.Configuration,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<IdpSecretProtector>.Instance);
+        var ssoAuth = builder.Services.AddAuthentication();
+        // Carrier scheme required by the OIDC handler for the handshake result. Our own JWT
+        // cookie is issued in OnTicketReceived and this cookie is never actually written.
+        ssoAuth.AddCookie("sso-external");
+
+        foreach (var sp in ssoProviders)
+        {
+            var scheme     = $"oidc-{sp.Slug}";
+            var providerId = sp.Id;
+            var slug       = sp.Slug;
+            var secret     = sp.SecretEnc is { Length: > 0 } ? ssoProtector.Unprotect(providerId, sp.SecretEnc) : null;
+
+            ssoAuth.AddOpenIdConnect(scheme, options =>
+            {
+                options.SignInScheme  = "sso-external";
+                options.Authority     = sp.Authority;
+                options.ClientId      = sp.ClientId;
+                options.ClientSecret  = secret;
+                options.ResponseType  = "code";   // authorization code flow only
+                options.UsePkce       = true;     // (also the handler default for code flow)
+                options.CallbackPath  = $"/api/auth/sso/{slug}/callback";
+                // https metadata required except for http://localhost test IdPs (mirrors the
+                // authority validation rule in IdentityProviderInput.Validate).
+                options.RequireHttpsMetadata = sp.Authority.StartsWith("https", StringComparison.OrdinalIgnoreCase);
+                options.Scope.Clear();
+                options.Scope.Add("openid");
+                options.Scope.Add("profile");
+                options.Scope.Add("email");
+                options.GetClaimsFromUserInfoEndpoint = true;
+                options.SaveTokens = false;       // we issue our own session; IdP tokens are not kept
+                options.Events = new Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectEvents
+                {
+                    OnTicketReceived = ctx => SsoLogin.CompleteAsync(ctx, providerId, slug),
+                    OnRemoteFailure  = ctx =>
+                    {
+                        // Correlation failures, user-cancelled consent, IdP errors — coarse
+                        // code to the client, detail stays in the server log.
+                        ctx.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+                            .CreateLogger("PasMigration.Auth.SsoLogin")
+                            .LogWarning("SSO remote failure: provider={Slug} error={Error}", slug, ctx.Failure?.Message);
+                        ctx.Response.Redirect("/?sso_error=provider_error");
+                        ctx.HandleResponse();
+                        return Task.CompletedTask;
+                    },
+                };
+            });
+            ssoRegistry.Register(slug, scheme, providerId);
+        }
+        Console.WriteLine($"[startup] SSO: registered {ssoProviders.Count} OIDC scheme(s): {string.Join(", ", ssoProviders.Select(x => x.Slug))}");
+    }
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"[startup] WARNING: SSO scheme registration skipped ({ex.Message}). Local login is unaffected.");
+}
 // Fallback policy: every endpoint requires an authenticated user unless it carries explicit
 // authorization metadata (.AllowAnonymous() or its own .RequireAuthorization(...) policy).
 // This closes the previous gap where only the auth/admin endpoints were protected and all
@@ -530,6 +607,18 @@ app.MapPost("/api/auth/logout", (HttpResponse response) =>
 {
     response.Cookies.Delete("auth_token");
     return Results.Ok(new { message = "Logged out." });
+}).AllowAnonymous();
+
+// ── SSO sign-in (anonymous by nature) ────────────────────────────────────────────────────
+// Kicks off the OIDC dance for the named provider. The registry check turns an unknown or
+// disabled slug into a 404 instead of an unknown-scheme 500. The callback
+// (/api/auth/sso/{slug}/callback) is handled entirely by the OpenIdConnect middleware and
+// completed in SsoLogin.CompleteAsync — there is deliberately no route mapped for it here.
+app.MapGet("/api/auth/sso/{slug}/login", (string slug, SsoSchemeRegistry registry) =>
+{
+    if (!registry.TryGetScheme(slug, out var scheme))
+        return Results.NotFound(new { message = "Unknown or disabled identity provider (a newly added provider needs an api restart)." });
+    return Results.Challenge(new AuthenticationProperties { RedirectUri = "/" }, [scheme]);
 }).AllowAnonymous();
 
 app.MapPost("/api/auth/change-password",
