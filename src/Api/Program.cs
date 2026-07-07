@@ -37,6 +37,10 @@ builder.Services.AddScoped<PasMigration.Data.ICredentialRepository, PasMigration
 builder.Services.AddScoped<PasMigration.Data.IInventoryRepository, PasMigration.Data.InventoryRepository>();
 builder.Services.AddScoped<PasMigration.Data.IMigrationRepository, PasMigration.Data.MigrationRepository>();
 builder.Services.AddScoped<PasMigration.Data.ISettingsRepository, PasMigration.Data.SettingsRepository>();
+builder.Services.AddScoped<PasMigration.Data.IIdentityProviderRepository, PasMigration.Data.IdentityProviderRepository>();
+builder.Services.AddScoped<PasMigration.Data.IUserIdentityRepository, PasMigration.Data.UserIdentityRepository>();
+// Encrypts OIDC client secrets at rest (config-only dependencies — singleton is fine).
+builder.Services.AddSingleton<IdpSecretProtector>();
 // Connector factories (own HttpClient creation; make services testable with fake clients).
 builder.Services.AddSingleton<PasMigration.Connectors.IPasConnectorFactory, PasMigration.Connectors.PasConnectorFactory>();
 builder.Services.AddSingleton<PasMigration.Connectors.ISecretServerConnectorFactory, PasMigration.Connectors.SecretServerConnectorFactory>();
@@ -665,9 +669,120 @@ app.MapGet("/api/diag/ollama", async ([FromServices] ILlmProvider llm, [FromServ
     }
 }).RequireAuthorization(p => p.RequireRole("admin"));
 
+// ── Admin: identity providers (SSO groundwork — configuration CRUD only) ─────────────────
+// No login-flow change yet: these rows are inert until the OIDC challenge/callback step
+// ships. Client secrets are encrypted at rest (IdpSecretProtector) and are NEVER returned by
+// the API — responses expose only hasClientSecret. On update, a blank/omitted clientSecret
+// keeps the stored one.
+
+static PasMigration.Data.IdentityProviderWrite ToProviderWrite(IdentityProviderInput i) => new(
+    i.Name.Trim(), i.Slug, i.Authority, i.ClientId.Trim(),
+    i.Enabled, i.JitProvisioning, i.DefaultRole,
+    i.AllowedEmailDomains ?? [], i.RoleClaim, i.RoleMappingsJson);
+
+app.MapGet("/api/admin/identity-providers",
+    async (PasMigration.Data.IIdentityProviderRepository repo, CancellationToken ct) =>
+    {
+        var rows = await repo.ListAsync(ct);
+        return Results.Ok(rows.Select(r => new
+        {
+            id = r.Id, name = r.Name, slug = r.Slug, type = r.Type,
+            authority = r.Authority, clientId = r.ClientId,
+            hasClientSecret = r.ClientSecretEnc is { Length: > 0 },
+            enabled = r.Enabled, jitProvisioning = r.JitProvisioning,
+            defaultRole = r.DefaultRole, allowedEmailDomains = r.AllowedEmailDomains,
+            roleClaim = r.RoleClaim, roleMappingsJson = r.RoleMappingsJson,
+            createdAt = r.CreatedAt,
+        }));
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPost("/api/admin/identity-providers",
+    async (IdentityProviderInput input, PasMigration.Data.IIdentityProviderRepository repo,
+           IdpSecretProtector protector, CancellationToken ct) =>
+    {
+        if (input.Validate() is { } error)
+            return Results.BadRequest(new { message = error });
+        if (await repo.SlugExistsAsync(input.Slug, null, ct))
+            return Results.Conflict(new { message = $"Slug '{input.Slug}' is already in use." });
+
+        // Id is generated app-side: the secret encryption key is HKDF-salted with the
+        // provider id, so the id must exist before the secret can be encrypted.
+        var id  = Guid.NewGuid();
+        var enc = string.IsNullOrEmpty(input.ClientSecret) ? null : protector.Protect(id, input.ClientSecret);
+        await repo.InsertAsync(id, ToProviderWrite(input), enc, ct);
+        return Results.Created($"/api/admin/identity-providers/{id}", new { id });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapPut("/api/admin/identity-providers/{id:guid}",
+    async (Guid id, IdentityProviderInput input, PasMigration.Data.IIdentityProviderRepository repo,
+           IdpSecretProtector protector, CancellationToken ct) =>
+    {
+        if (input.Validate() is { } error)
+            return Results.BadRequest(new { message = error });
+        if (await repo.SlugExistsAsync(input.Slug, id, ct))
+            return Results.Conflict(new { message = $"Slug '{input.Slug}' is already in use." });
+
+        // Blank secret = keep the existing ciphertext (COALESCE in the repository).
+        var enc  = string.IsNullOrEmpty(input.ClientSecret) ? null : protector.Protect(id, input.ClientSecret);
+        var rows = await repo.UpdateAsync(id, ToProviderWrite(input), enc, ct);
+        return rows == 0
+            ? Results.NotFound(new { message = "Identity provider not found." })
+            : Results.Ok(new { id });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
+app.MapDelete("/api/admin/identity-providers/{id:guid}",
+    async (Guid id, PasMigration.Data.IIdentityProviderRepository repo,
+           PasMigration.Data.IUserIdentityRepository identities, CancellationToken ct) =>
+    {
+        // user_identity FK is ON DELETE RESTRICT — give a friendly error instead of a 500.
+        var links = await identities.CountByProviderAsync(id, ct);
+        if (links > 0)
+            return Results.Conflict(new
+            { message = $"Provider has {links} linked user identities. Unlink them before deleting." });
+
+        var rows = await repo.DeleteAsync(id, ct);
+        return rows == 0
+            ? Results.NotFound(new { message = "Identity provider not found." })
+            : Results.Ok(new { deleted = true });
+    }).RequireAuthorization(p => p.RequireRole("admin"));
+
 app.Run();
 
 public record CreateEngagement(string Name, string CustomerName);
 public record RevertRequest(bool Confirm, MigrationRunInput Connection);
 public record CreateFileTemplateRequest(TestConnectionInput Connection, string Name);
 public record UpdateSettingsRequest(int SessionTimeoutHours);
+
+/// <summary>Admin input for creating/updating an identity provider. ClientSecret is
+/// write-only: blank on update means "keep the stored secret".</summary>
+public sealed record IdentityProviderInput(
+    string Name, string Slug, string Authority, string ClientId, string? ClientSecret,
+    bool Enabled = true, bool JitProvisioning = false, string DefaultRole = "viewer",
+    string[]? AllowedEmailDomains = null, string? RoleClaim = null, string? RoleMappingsJson = null)
+{
+    private static readonly System.Text.RegularExpressions.Regex SlugRx =
+        new("^[a-z0-9][a-z0-9-]{1,39}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly string[] ValidRoles = ["admin", "operator", "viewer"];
+
+    /// <summary>Returns an error message, or null when valid. Pure — unit-tested.</summary>
+    public string? Validate()
+    {
+        if (string.IsNullOrWhiteSpace(Name))
+            return "Name is required.";
+        if (Slug is null || !SlugRx.IsMatch(Slug))
+            return "Slug must be 2-40 characters: lowercase letters, digits, hyphens (it appears in URLs).";
+        if (!Uri.TryCreate(Authority, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttps && !(uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback)))
+            return "Authority must be an https URL (http is allowed for localhost testing only).";
+        if (string.IsNullOrWhiteSpace(ClientId))
+            return "ClientId is required.";
+        if (!ValidRoles.Contains(DefaultRole))
+            return "DefaultRole must be admin, operator, or viewer.";
+        if (!string.IsNullOrWhiteSpace(RoleMappingsJson))
+        {
+            try { using var _ = System.Text.Json.JsonDocument.Parse(RoleMappingsJson); }
+            catch { return "RoleMappingsJson must be valid JSON."; }
+        }
+        return null;
+    }
+}
