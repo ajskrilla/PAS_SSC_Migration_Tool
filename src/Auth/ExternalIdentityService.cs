@@ -96,7 +96,12 @@ public sealed class ExternalIdentityService(
         }
 
         // 4. Nobody to be. (JIT provisioning arrives in a later step.)
-        log.LogWarning("SSO rejected (unknown): provider={Slug} sub={Sub}", provider.Slug, identity.Subject);
+        // Log the email claim and its trust status: an admin diagnosing this must be able to
+        // distinguish "no matching local user" from "email arrived but mismatched" from "no
+        // email claim at all" (e.g. the IdP's optional email claim wasn't configured).
+        // Internal admin-tool log; the email is the operator's own sign-in identifier.
+        log.LogWarning("SSO rejected (unknown): provider={Slug} sub={Sub} email={Email} emailVerified={Verified}",
+            provider.Slug, identity.Subject, identity.Email ?? "(no email claim)", identity.EmailVerified);
         return SsoResolution.Reject(SsoRejection.UnknownUser);
     }
 }
