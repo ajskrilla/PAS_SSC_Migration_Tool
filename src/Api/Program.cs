@@ -542,9 +542,14 @@ app.MapGet("/api/engagements/{id:guid}/cyberark/permission-preview",
             {
                 safeName = d["safe_name"]?.ToString(),
                 memberName = d["member_name"]?.ToString(),
-                mapping = string.IsNullOrEmpty(attrs)
+                // JsonNode, not JsonElement: JsonElement is a struct, so a
+                // `null : JsonElement` conditional has no common type (CS0173). JsonNode is a
+                // reference type and JsonNode.Parse already returns JsonNode?, so the null
+                // branch converts cleanly and the parsed object still serializes inline
+                // rather than as an escaped string.
+                mapping = string.IsNullOrWhiteSpace(attrs)
                     ? null
-                    : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(attrs),
+                    : System.Text.Json.Nodes.JsonNode.Parse(attrs),
             };
         }).ToList();
 
