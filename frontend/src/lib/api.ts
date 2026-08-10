@@ -23,9 +23,23 @@ export interface TestConnectionResult {
 }
 
 // Sent to /api/connections/test. Credentials are used in-memory by the server and never stored.
+// Source systems the tool can migrate FROM, plus the single target system.
+export type SystemType = "pas" | "cyberark" | "secret_server";
+
+// CyberArk's five logon methods. The four session methods are PVWA logons (Self-Hosted /
+// on-prem); cyberark_oauth is Privilege Cloud, via a CyberArk Identity token endpoint.
+export type AuthMode =
+  | "platform_client_credentials"
+  | "legacy_password"
+  | "cyberark_ldap"
+  | "cyberark_vault"
+  | "cyberark_radius"
+  | "cyberark_windows"
+  | "cyberark_oauth";
+
 export interface TestConnectionInput {
-  systemType: "pas" | "secret_server";
-  authMode: "platform_client_credentials" | "legacy_password";
+  systemType: SystemType;
+  authMode: AuthMode;
   baseUrl?: string;
   platformBaseUrl?: string;
   secretServerBaseUrl?: string;
@@ -36,6 +50,7 @@ export interface TestConnectionInput {
   scope?: string;
   engagementId?: string;          // when set, a green test caches creds in the session vault
   role?: "source" | "target";
+  identityTokenUrl?: string;      // CyberArk Privilege Cloud only
 }
 
 // Identity provider (SSO) config as returned by /api/admin/identity-providers.
@@ -108,10 +123,11 @@ export const api = {
     engagementId: string,
     body: {
       role: "source" | "target";
-      systemType: "pas" | "secret_server";
+      systemType: SystemType;
       baseUrl?: string;
       platformTenant?: string;
-      authMode: "platform_client_credentials" | "legacy_password";
+      authMode: AuthMode;
+      identityTokenUrl?: string;   // CyberArk Privilege Cloud only
     },
   ) =>
     credFetch(`/api/engagements/${engagementId}/connections`, {
@@ -390,6 +406,9 @@ export interface InventoryRunResult {
   textSecrets: number;
   fileSecrets: number;
   folders: number;
+  // CyberArk only; zero for the other source types.
+  safes: number;
+  safeMembers: number;
 }
 
 export interface SnapshotSummary {

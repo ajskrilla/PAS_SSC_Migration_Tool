@@ -555,6 +555,143 @@ public sealed class SecretServerConnector : ISecretServerClient
     private static StringContent JsonBody(object o) =>
         new(JsonSerializer.Serialize(o, JsonOpts), Encoding.UTF8, "application/json");
 
+    // ---- Folder permissions ------------------------------------------------------------------
+    // Added for the CyberArk source, which is the first source with a permission model to carry
+    // across. PAS folder sets have no member ACL, so nothing before this needed them.
+
+    /// <summary>
+    /// Resolve a principal name to a user or group by EXACT match, users first.
+    ///
+    /// filter.searchText is a SUBSTRING search, so its results must be filtered client-side. The
+    /// original PowerShell called this out explicitly and it is worth repeating: taking the first
+    /// search hit would grant a different account access to the folder. A name that matches more
+    /// than one principal exactly is reported as ambiguous rather than guessed at.
+    ///
+    /// Users are searched before groups, matching the source toolkit. CyberArk's own memberType
+    /// is deliberately NOT used to pick which to search: it reflects how CyberArk classified the
+    /// principal, which need not match how Secret Server holds it.
+    /// </summary>
+    public async Task<PrincipalLookup> FindPrincipalAsync(string name, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return PrincipalLookup.NotFound();
+        var enc = Uri.EscapeDataString(name);
+
+        var users = await SearchPrincipalsAsync(
+            $"/users?filter.searchText={enc}", name, isUser: true,
+            nameProps: ["userName", "displayName"], ct);
+        if (users.Count == 1) return PrincipalLookup.Single(users[0]);
+        if (users.Count > 1) return PrincipalLookup.TooMany(users.Count);
+
+        var groups = await SearchPrincipalsAsync(
+            $"/groups?filter.searchText={enc}", name, isUser: false,
+            nameProps: ["groupName", "name"], ct);
+        if (groups.Count == 1) return PrincipalLookup.Single(groups[0]);
+        if (groups.Count > 1) return PrincipalLookup.TooMany(groups.Count);
+
+        return PrincipalLookup.NotFound();
+    }
+
+    private async Task<List<PrincipalRef>> SearchPrincipalsAsync(
+        string path, string wanted, bool isUser, string[] nameProps, CancellationToken ct)
+    {
+        var matches = new List<PrincipalRef>();
+
+        var req = SsRequest(HttpMethod.Get, path);
+        using var resp = await _http.SendAsync(req, ct);
+        // A search that matches nothing can come back 404 on SS Cloud — that is "none", not an error.
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return matches;
+        var body = await EnsureOk(resp, "GET", path, ct);
+
+        using var doc = JsonDocument.Parse(body);
+        if (!doc.RootElement.TryGetProperty("records", out var records)) return matches;
+
+        foreach (var rec in records.EnumerateArray())
+        {
+            if (!rec.TryGetProperty("id", out var idEl) || !idEl.TryGetInt64(out var id)) continue;
+
+            foreach (var prop in nameProps)
+            {
+                if (!rec.TryGetProperty(prop, out var nv) || nv.ValueKind != JsonValueKind.String) continue;
+                var candidate = nv.GetString();
+                if (!string.Equals(candidate, wanted, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Dedupe: userName and displayName can both match the same record.
+                if (matches.All(m => m.Id != id))
+                    matches.Add(new PrincipalRef(id, isUser, candidate!));
+                break;
+            }
+        }
+        return matches;
+    }
+
+    /// <summary>
+    /// POST /folder-permissions. The endpoint takes role NAMES ("View", "Add Secret", "Edit",
+    /// "Owner" for the folder; "List", "View", "Edit", "Owner" for secrets) rather than ids, and
+    /// exactly one of userId / groupId.
+    /// </summary>
+    public async Task AssignFolderPermissionAsync(
+        long folderId, PrincipalRef principal, string folderAccessRoleName,
+        string secretAccessRoleName, CancellationToken ct = default)
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["folderId"] = folderId,
+            ["folderAccessRoleName"] = folderAccessRoleName,
+            ["secretAccessRoleName"] = secretAccessRoleName,
+        };
+        if (principal.IsUser) body["userId"] = principal.Id;
+        else body["groupId"] = principal.Id;
+
+        var req = SsRequest(HttpMethod.Post, "/folder-permissions");
+        req.Content = JsonBody(body);
+        using var resp = await _http.SendAsync(req, ct);
+        await EnsureOk(resp, "POST", "/folder-permissions", ct);
+    }
+
+    public async Task<long?> CurrentUserIdAsync(CancellationToken ct = default)
+    {
+        var req = SsRequest(HttpMethod.Get, "/users/current");
+        using var resp = await _http.SendAsync(req, ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+        var body = await EnsureOk(resp, "GET", "/users/current", ct);
+
+        using var doc = JsonDocument.Parse(body);
+        foreach (var prop in new[] { "id", "userId" })
+            if (doc.RootElement.TryGetProperty(prop, out var v) && v.TryGetInt64(out var id))
+                return id;
+        return null;
+    }
+
+    public async Task<bool> RemoveUserFolderPermissionAsync(
+        long folderId, long userId, CancellationToken ct = default)
+    {
+        var path = $"/folder-permissions?filter.folderId={folderId}&filter.userId={userId}";
+        var req = SsRequest(HttpMethod.Get, path);
+        using var resp = await _http.SendAsync(req, ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return false;
+        var body = await EnsureOk(resp, "GET", path, ct);
+
+        var ids = new List<long>();
+        using (var doc = JsonDocument.Parse(body))
+        {
+            if (doc.RootElement.TryGetProperty("records", out var records))
+                foreach (var rec in records.EnumerateArray())
+                    if (rec.TryGetProperty("id", out var idEl) && idEl.TryGetInt64(out var pid))
+                        ids.Add(pid);
+        }
+        if (ids.Count == 0) return false;
+
+        var removed = false;
+        foreach (var pid in ids)
+        {
+            var delPath = $"/folder-permissions/{pid}";
+            var delReq = SsRequest(HttpMethod.Delete, delPath);
+            using var delResp = await _http.SendAsync(delReq, ct);
+            if (delResp.IsSuccessStatusCode) removed = true;
+        }
+        return removed;
+    }
+
     // NOTE: CreateSecret (text + inline-base64 file fields) and GET-verify are the next
     // methods to port from Import-PASFilesToSecretServer.ps1. Stubbed in the migration
     // module so the orchestrator interface is wired before the open file-fidelity item

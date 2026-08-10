@@ -35,6 +35,59 @@ public interface ISecretServerClient
     Task<bool> DeleteFolderAsync(long folderId, CancellationToken ct = default);
     Task<List<Dictionary<string, object?>>> InventoryFoldersAsync(CancellationToken ct = default);
     Task<List<Dictionary<string, object?>>> InventorySecretsAsync(CancellationToken ct = default);
+
+    // ---- Folder permissions (added for the CyberArk source) ----
+    // PAS has no safe-permission concept, so nothing before CyberArk needed these. They are on
+    // the shared interface rather than a CyberArk-specific one because they are plain Secret
+    // Server capabilities that any future source could use.
+
+    /// <summary>
+    /// Resolve a principal name to a Secret Server user or group by EXACT match.
+    ///
+    /// Never returns a substring hit: granting folder access to the wrong account because
+    /// "svc-sql" partially matched "svc-sql-admin" is a silent privilege escalation. An
+    /// ambiguous name (more than one exact match) is a refusal, not a coin flip.
+    /// </summary>
+    Task<PrincipalLookup> FindPrincipalAsync(string name, CancellationToken ct = default);
+
+    /// <summary>
+    /// Grant a principal folder + secret access on a folder. Role NAMES, not ids — that is what
+    /// the endpoint takes. Exactly one of userId/groupId is sent, decided by
+    /// <paramref name="principal"/>.
+    /// </summary>
+    Task AssignFolderPermissionAsync(
+        long folderId, PrincipalRef principal, string folderAccessRoleName,
+        string secretAccessRoleName, CancellationToken ct = default);
+
+    /// <summary>Id of the currently authenticated user, used to find and remove the creator grant.</summary>
+    Task<long?> CurrentUserIdAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Remove a user's folder permission. Used only to drop the migrating account's own creator
+    /// grant, and only once the folder demonstrably has another Owner.
+    /// </summary>
+    Task<bool> RemoveUserFolderPermissionAsync(long folderId, long userId, CancellationToken ct = default);
+}
+
+/// <summary>A resolved Secret Server principal.</summary>
+/// <param name="Id">User or group id.</param>
+/// <param name="IsUser">True for a user, false for a group.</param>
+/// <param name="Name">The name as Secret Server holds it.</param>
+public sealed record PrincipalRef(long Id, bool IsUser, string Name);
+
+/// <summary>
+/// Outcome of a principal lookup. Deliberately three-valued: "not found" and "ambiguous" are
+/// different operator problems (create the account vs. disambiguate the name) and collapsing
+/// them into null would lose that.
+/// </summary>
+public sealed record PrincipalLookup(PrincipalRef? Principal, int ExactMatchCount)
+{
+    public bool Found => Principal is not null;
+    public bool Ambiguous => ExactMatchCount > 1;
+
+    public static PrincipalLookup NotFound() => new(null, 0);
+    public static PrincipalLookup Single(PrincipalRef p) => new(p, 1);
+    public static PrincipalLookup TooMany(int count) => new(null, count);
 }
 
 /// <summary>

@@ -1,15 +1,29 @@
 import { useEffect, useState } from "react";
-import { api, type Engagement, type TestConnectionResult, type SnapshotSummary } from "../lib/api";
+import {
+  api,
+  type Engagement,
+  type TestConnectionResult,
+  type SnapshotSummary,
+  type SystemType,
+  type AuthMode,
+} from "../lib/api";
 import { downloadInventoryCsv, printInventorySummary } from "../lib/inventoryExport";
 
 type Role = "source" | "target";
+
+// Which source system this engagement migrates FROM. Chosen per engagement on the source card;
+// the target is always Secret Server / Platform.
+type SourceSystem = "pas" | "cyberark";
 
 interface FormState {
   // metadata (persisted)
   baseUrl: string;
   platformTenant: string;
-  authMode: "platform_client_credentials" | "legacy_password";
+  authMode: AuthMode;
   appId: string;
+  // CyberArk Privilege Cloud only: the CyberArk Identity token endpoint. Not derivable from the
+  // PVWA URL - different hostname, different domain - so it is entered separately.
+  identityTokenUrl: string;
   // platform/SS split URLs (optional overrides)
   platformBaseUrl: string;
   secretServerBaseUrl: string;
@@ -20,11 +34,12 @@ interface FormState {
   scope: string;
 }
 
-const blankForm = (authMode: FormState["authMode"]): FormState => ({
+const blankForm = (authMode: AuthMode): FormState => ({
   baseUrl: "",
   platformTenant: "",
   authMode,
   appId: "",
+  identityTokenUrl: "",
   platformBaseUrl: "",
   secretServerBaseUrl: "",
   clientId: "",
@@ -91,7 +106,9 @@ export function Connections() {
           <div className="cred-status-cards">
             {credInfo.source && (
               <div className="cred-status-card">
-                <div className="cred-status-role">SOURCE · PAS</div>
+                <div className="cred-status-role">
+                  SOURCE · {credInfo.source.systemType === "cyberark" ? "CYBERARK" : "PAS"}
+                </div>
                 <div className="cred-field"><span>URL</span><code>{credInfo.source.baseUrl ?? credInfo.source.platformBaseUrl ?? "—"}</code></div>
                 <div className="cred-field"><span>Client ID</span><code>{credInfo.source.clientId}</code></div>
                 {credInfo.source.appId && <div className="cred-field"><span>App ID</span><code>{credInfo.source.appId}</code></div>}
@@ -212,8 +229,11 @@ function InventoryExport({
 }
 
 function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; engagementId: string; hasStoredCreds: boolean }) {
-  // Source is PAS; target is Secret Server / Platform.
-  const systemType: "pas" | "secret_server" = role === "source" ? "pas" : "secret_server";
+  // The target is always Secret Server / Platform. The source is chosen here, because an
+  // engagement migrates from exactly one of PAS or CyberArk.
+  const [sourceSystem, setSourceSystem] = useState<SourceSystem>("pas");
+  const systemType: SystemType = role === "source" ? sourceSystem : "secret_server";
+  const isCyberArk = systemType === "cyberark";
   const [form, setForm] = useState<FormState>(blankForm("platform_client_credentials"));
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -244,6 +264,7 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
         baseUrl: form.baseUrl || undefined,
         platformTenant: form.platformTenant || undefined,
         authMode: form.authMode,
+        identityTokenUrl: form.identityTokenUrl || undefined,
       });
       setSaved(true);
     } catch (e) {
@@ -268,6 +289,7 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
         clientSecret: form.clientSecret,
         username: form.username || undefined,
         scope: form.scope || undefined,
+        identityTokenUrl: form.identityTokenUrl || undefined,
         engagementId,
         role,
       });
@@ -291,6 +313,7 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
     clientSecret: form.clientSecret,
     username: form.username || undefined,
     scope: form.scope || undefined,
+    identityTokenUrl: form.identityTokenUrl || undefined,
   });
 
   const runInventory = async () => {
@@ -299,8 +322,11 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
     try {
       const r = await api.runInventory(engagementId, { ...credPayload(), role });
       setInvMsg(
-        `Captured ${r.total} items — ${r.accounts} accounts, ${r.textSecrets} text, ` +
-        `${r.fileSecrets} file, ${r.folders} folders.`,
+        isCyberArk
+          ? `Captured ${r.total} items — ${r.safes} safes, ${r.accounts} accounts, ` +
+            `${r.safeMembers} safe members. No credential values were read.`
+          : `Captured ${r.total} items — ${r.accounts} accounts, ${r.textSecrets} text, ` +
+            `${r.fileSecrets} file, ${r.folders} folders.`,
       );
     } catch (e) {
       setInvMsg(`Inventory failed: ${String(e)}`);
@@ -310,6 +336,8 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
   };
 
   const isLegacy = form.authMode === "legacy_password";
+  const isCyberArkOAuth = form.authMode === "cyberark_oauth";
+  const isCyberArkWindows = form.authMode === "cyberark_windows";
   // Enabled after a fresh successful test, OR if this role already has credentials stored
   // server-side and the operator hasn't edited the form since the page loaded (editing implies
   // they may be changing values, which need a fresh test before we trust them again).
@@ -319,25 +347,81 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
     <section className="panel conn-card">
       <div className="conn-head">
         <span className="phase-no">{role === "source" ? "SOURCE" : "TARGET"}</span>
-        <h2>{role === "source" ? "Delinea / Centrify PAS" : "Secret Server / Platform"}</h2>
+        <h2>
+          {role === "target"
+            ? "Secret Server / Platform"
+            : isCyberArk
+              ? "CyberArk (PVWA / Privilege Cloud)"
+              : "Delinea / Centrify PAS"}
+        </h2>
       </div>
+
+      {role === "source" && (
+        <label className="field">
+          <span>Source system</span>
+          <select
+            value={sourceSystem}
+            onChange={(e) => {
+              const next = e.target.value as SourceSystem;
+              setSourceSystem(next);
+              // Auth modes do not overlap between the two sources, so switching resets the form
+              // rather than leaving a PAS auth mode selected against a CyberArk vault.
+              setForm(blankForm(next === "cyberark" ? "cyberark_ldap" : "platform_client_credentials"));
+              setResult(null);
+              setSaved(false);
+              setTested(false);
+              setDirty(true);
+              setInvMsg(null);
+            }}
+          >
+            <option value="pas">Delinea / Centrify PAS</option>
+            <option value="cyberark">CyberArk</option>
+          </select>
+        </label>
+      )}
 
       <label className="field">
         <span>Auth mode</span>
         <select value={form.authMode} onChange={(e) => set("authMode", e.target.value)}>
-          <option value="platform_client_credentials">Client credentials (OAuth2)</option>
-          {role === "target" && <option value="legacy_password">Legacy password (standalone SS)</option>}
+          {isCyberArk ? (
+            <>
+              <option value="cyberark_ldap">LDAP (on-prem PVWA)</option>
+              <option value="cyberark_vault">CyberArk vault user (on-prem PVWA)</option>
+              <option value="cyberark_radius">RADIUS (on-prem PVWA)</option>
+              <option value="cyberark_windows">Windows integrated auth (on-prem PVWA)</option>
+              <option value="cyberark_oauth">OAuth service user (Privilege Cloud)</option>
+            </>
+          ) : (
+            <>
+              <option value="platform_client_credentials">Client credentials (OAuth2)</option>
+              {role === "target" && <option value="legacy_password">Legacy password (standalone SS)</option>}
+            </>
+          )}
         </select>
       </label>
 
-      {role === "source" ? (
+      {role === "source" && isCyberArk && (
+        <>
+          <Text label="PVWA base URL" placeholder="https://pvwa.corp.local/PasswordVault"
+            value={form.baseUrl} onChange={(v) => set("baseUrl", v)} />
+          {isCyberArkOAuth && (
+            <Text label="CyberArk Identity token URL"
+              placeholder="https://tenant.id.cyberark.cloud/oauth2/platformtoken"
+              value={form.identityTokenUrl} onChange={(v) => set("identityTokenUrl", v)} />
+          )}
+        </>
+      )}
+
+      {role === "source" && !isCyberArk && (
         <>
           <Text label="Tenant base URL" placeholder="https://acme.my.centrify.net"
             value={form.baseUrl} onChange={(v) => set("baseUrl", v)} />
           <Text label="OAuth2 App ID" placeholder="e.g. migration-app"
             value={form.appId} onChange={(v) => set("appId", v)} />
         </>
-      ) : (
+      )}
+
+      {role === "target" && (
         <>
           <Text label="Platform base URL" placeholder="https://acme.delinea.app"
             value={form.platformBaseUrl} onChange={(v) => set("platformBaseUrl", v)} />
@@ -348,7 +432,24 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
 
       <div className="cred-block">
         <div className="cred-label">Credentials · session only</div>
-        {isLegacy ? (
+        {isCyberArkWindows ? (
+          <p className="muted note">
+            Windows integrated auth uses the identity the API container runs as. No credentials are
+            entered here.
+          </p>
+        ) : isCyberArkOAuth ? (
+          <>
+            <Text label="Client ID" value={form.clientId} onChange={(v) => set("clientId", v)} />
+            <Text label="Client secret" type="password" value={form.clientSecret}
+              onChange={(v) => set("clientSecret", v)} />
+          </>
+        ) : isCyberArk ? (
+          <>
+            <Text label="Username" value={form.username} onChange={(v) => set("username", v)} />
+            <Text label="Password" type="password" value={form.clientSecret}
+              onChange={(v) => set("clientSecret", v)} />
+          </>
+        ) : isLegacy ? (
           <>
             <Text label="Username" value={form.username} onChange={(v) => set("username", v)} />
             <Text label="Password" type="password" value={form.clientSecret}
@@ -366,12 +467,26 @@ function ConnectionCard({ role, engagementId, hasStoredCreds }: { role: Role; en
         )}
       </div>
 
+      {role === "source" && isCyberArk && (
+        <p className="muted note">
+          Inventory is read-only and reads no credential values — it captures safes, accounts and
+          safe members only. Passwords are retrieved during a migration run, for selected accounts.
+        </p>
+      )}
+
       <div className="conn-actions">
         <button className="btn ghost" onClick={saveMetadata} disabled={saving}>
           {saving ? "Saving…" : "Save settings"}
         </button>
         <button className="btn" onClick={test}
-          disabled={testing || (!isLegacy && !form.clientId) || !form.clientSecret}>
+          disabled={
+            testing ||
+            (isCyberArkWindows
+              ? !form.baseUrl
+              : isCyberArk
+                ? (isCyberArkOAuth ? !form.clientId : !form.username) || !form.clientSecret
+                : (!isLegacy && !form.clientId) || !form.clientSecret)
+          }>
           {testing ? "Testing…" : "Test connection"}
         </button>
         <button className="btn" onClick={runInventory}

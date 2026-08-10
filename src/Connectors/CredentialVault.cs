@@ -76,7 +76,7 @@ public sealed class CredentialVault : IDisposable
 /// don't have to re-supply URLs either. Secret material here lives in process memory only.
 /// </summary>
 public sealed record SessionCredentials(
-    string SystemType,            // pas | secret_server
+    string SystemType,            // pas | cyberark | secret_server
     string AuthMode,
     string? BaseUrl,
     string? PlatformBaseUrl,
@@ -85,4 +85,9 @@ public sealed record SessionCredentials(
     string ClientId,
     string ClientSecret,
     string? Username,
-    string? Scope);
+    string? Scope,
+    // CyberArk Privilege Cloud only: the CyberArk Identity token endpoint. It is on a different
+    // hostname to the PVWA and cannot be derived from it, so it needs its own field. Trailing and
+    // optional so existing encrypted blobs — serialized before this field existed — still
+    // deserialize (JSON deserialization leaves it null).
+    string? IdentityTokenUrl = null);

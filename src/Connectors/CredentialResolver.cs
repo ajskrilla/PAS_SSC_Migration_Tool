@@ -47,6 +47,7 @@ public sealed class CredentialResolver(CredentialVault vault, CredentialEncrypti
             ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : input.ClientSecret,
             Username            = stored.Username ?? input.Username,
             Scope               = stored.Scope ?? input.Scope,
+            IdentityTokenUrl    = stored.IdentityTokenUrl ?? input.IdentityTokenUrl,
         };
     }
 
@@ -72,6 +73,38 @@ public sealed class CredentialResolver(CredentialVault vault, CredentialEncrypti
             ClientSecret        = stored.ClientSecret.Length > 0 ? stored.ClientSecret : input.ClientSecret,
             Username            = stored.Username ?? input.Username,
             Scope               = stored.Scope ?? input.Scope,
+            IdentityTokenUrl    = stored.IdentityTokenUrl ?? input.IdentityTokenUrl,
+        };
+    }
+
+    /// <summary>
+    /// Merges BOTH roles into a CyberArk migration run: CyberArk fields from the stored "source"
+    /// credentials, Secret Server fields from the stored "target" credentials. Same precedence as
+    /// the PAS overload — a stored value wins whenever it is present.
+    /// </summary>
+    public async Task<CyberArkMigrationInput> MergeAsync(
+        Guid engagementId, CyberArkMigrationInput input, CancellationToken ct = default)
+    {
+        var src = await GetAsync(engagementId, "source", ct);
+        var tgt = await GetAsync(engagementId, "target", ct);
+        if (src is null && tgt is null) return input;
+
+        return input with
+        {
+            PvwaBaseUrl              = src?.BaseUrl ?? input.PvwaBaseUrl,
+            CyberArkAuthMode         = !string.IsNullOrEmpty(src?.AuthMode) ? src.AuthMode : input.CyberArkAuthMode,
+            CyberArkUsername         = src?.Username ?? input.CyberArkUsername,
+            // For the on-prem session logons the vault password rides in ClientSecret, the same
+            // slot the OAuth client secret uses. Which one it is depends on CyberArkAuthMode.
+            CyberArkPassword         = src?.ClientSecret.Length > 0 ? src.ClientSecret : input.CyberArkPassword,
+            CyberArkClientId         = src?.ClientId.Length > 0 ? src.ClientId : input.CyberArkClientId,
+            CyberArkClientSecret     = src?.ClientSecret.Length > 0 ? src.ClientSecret : input.CyberArkClientSecret,
+            CyberArkIdentityTokenUrl = src?.IdentityTokenUrl ?? input.CyberArkIdentityTokenUrl,
+            SsBaseUrl                = tgt?.BaseUrl ?? input.SsBaseUrl,
+            SsPlatformBaseUrl        = tgt?.PlatformBaseUrl ?? input.SsPlatformBaseUrl,
+            SsSecretServerBaseUrl    = tgt?.SecretServerBaseUrl ?? input.SsSecretServerBaseUrl,
+            SsClientId               = tgt?.ClientId.Length > 0 ? tgt.ClientId : input.SsClientId,
+            SsClientSecret           = tgt?.ClientSecret.Length > 0 ? tgt.ClientSecret : input.SsClientSecret,
         };
     }
 

@@ -31,6 +31,9 @@ builder.Services.AddHttpClient("tenant").ConfigurePrimaryHttpMessageHandler(() =
 builder.Services.AddScoped<ConnectionService>();
 builder.Services.AddScoped<InventoryService>();
 builder.Services.AddScoped<MigrationService>();
+// CyberArk source. A sibling service rather than a branch inside MigrationService — the flows
+// differ in stages, ordering and safety rules; see CyberArkMigrationService's class comment.
+builder.Services.AddScoped<CyberArkMigrationService>();
 // Data-access layer (repositories own SQL). First seam: engagements.
 builder.Services.AddScoped<PasMigration.Data.IEngagementRepository, PasMigration.Data.EngagementRepository>();
 builder.Services.AddScoped<PasMigration.Data.IUserRepository, PasMigration.Data.UserRepository>();
@@ -45,6 +48,7 @@ builder.Services.AddSingleton<IdpSecretProtector>();
 // Connector factories (own HttpClient creation; make services testable with fake clients).
 builder.Services.AddSingleton<PasMigration.Connectors.IPasConnectorFactory, PasMigration.Connectors.PasConnectorFactory>();
 builder.Services.AddSingleton<PasMigration.Connectors.ISecretServerConnectorFactory, PasMigration.Connectors.SecretServerConnectorFactory>();
+builder.Services.AddSingleton<PasMigration.Connectors.ICyberArkConnectorFactory, PasMigration.Connectors.CyberArkConnectorFactory>();
 // Session credential store: in-memory, 60-min sliding idle, cleared on restart.
 builder.Services.AddSingleton(new CredentialVault(TimeSpan.FromMinutes(60)));
 // Encrypts credentials for persistence across restarts.
@@ -356,7 +360,7 @@ app.MapPost("/api/connections/test",
             var creds2 = new SessionCredentials(
                 input.SystemType, input.AuthMode, input.BaseUrl, input.PlatformBaseUrl,
                 input.SecretServerBaseUrl, input.AppId, input.ClientId, input.ClientSecret,
-                input.Username, input.Scope);
+                input.Username, input.Scope, input.IdentityTokenUrl);
             vault.Put(eng, role, creds2);
 
             // Persist encrypted credentials so they survive container restarts.
@@ -498,6 +502,54 @@ app.MapPost("/api/engagements/{id:guid}/migrate",
         try { return Results.Ok(await svc.RunAsync(id, input, ct)); }
         catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
     }).RequireAuthorization("OperatorWrite");
+
+// CyberArk migration. A separate route rather than a branch inside /migrate because the request
+// shape genuinely differs (five source auth methods, a permission stage, no unmanage step) and
+// because a malformed CyberArk body should never be able to start a PAS run or vice versa.
+app.MapPost("/api/engagements/{id:guid}/migrate/cyberark",
+    async (Guid id, CyberArkMigrationInput input, CyberArkMigrationService svc,
+           CredentialResolver creds, CancellationToken ct) =>
+    {
+        input = await creds.MergeAsync(id, input, ct);
+        try { return Results.Ok(await svc.RunAsync(id, input, ct)); }
+        catch (Exception ex) { return Results.BadRequest(new { message = ex.Message }); }
+    }).RequireAuthorization("OperatorWrite");
+
+// Pre-migration permission review: what each CyberArk safe membership WILL become, straight from
+// the latest source snapshot. Read-only, and the screen an engineer is expected to sign off before
+// running the permission stage — the translation is lossy by nature and the losses are listed here.
+app.MapGet("/api/engagements/{id:guid}/cyberark/permission-preview",
+    async (Guid id, IDbConnection db, CancellationToken ct) =>
+    {
+        var rows = await db.QueryAsync(new CommandDefinition(
+            @"SELECT ii.name AS member_name, ii.folder_path AS safe_name, ii.attributes::text AS attributes
+              FROM inventory_item ii
+              JOIN inventory_snapshot s ON s.id = ii.snapshot_id
+              JOIN tenant_connection tc ON tc.id = s.tenant_connection_id
+              WHERE s.engagement_id=@e AND tc.role='source' AND ii.item_type='safe_member'
+                AND s.captured_at = (
+                    SELECT MAX(s2.captured_at) FROM inventory_snapshot s2
+                    JOIN tenant_connection tc2 ON tc2.id = s2.tenant_connection_id
+                    WHERE s2.engagement_id=@e AND tc2.role='source')
+              ORDER BY ii.folder_path, ii.name",
+            new { e = id }, cancellationToken: ct));
+
+        var items = rows.Select(r =>
+        {
+            var d = (IDictionary<string, object?>)r;
+            var attrs = d["attributes"] as string;
+            return new
+            {
+                safeName = d["safe_name"]?.ToString(),
+                memberName = d["member_name"]?.ToString(),
+                mapping = string.IsNullOrEmpty(attrs)
+                    ? null
+                    : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(attrs),
+            };
+        }).ToList();
+
+        return Results.Ok(items);
+    }).RequireAuthorization("EngagementMember");
 
 // Revert: delete tool-created target items (lab testing). Requires explicit confirm=true.
 app.MapPost("/api/engagements/{id:guid}/revert",

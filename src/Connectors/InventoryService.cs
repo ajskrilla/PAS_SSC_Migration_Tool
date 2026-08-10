@@ -9,7 +9,11 @@ namespace PasMigration.Connectors;
 /// inventory_snapshot + inventory_item rows. Also builds the source/target
 /// reconciliation diff. No secret values are read or stored - metadata only.
 /// </summary>
-public sealed class InventoryService(IDbConnection db, IPasConnectorFactory pasFactory, ISecretServerConnectorFactory ssFactory)
+public sealed class InventoryService(
+    IDbConnection db,
+    IPasConnectorFactory pasFactory,
+    ISecretServerConnectorFactory ssFactory,
+    ICyberArkConnectorFactory caFactory)
 {
     /// <summary>
     /// Capture a full inventory for one tenant connection using session credentials.
@@ -37,11 +41,12 @@ public sealed class InventoryService(IDbConnection db, IPasConnectorFactory pasF
                 input.AuthMode,
             });
 
-        var items = new List<InvItem>();
-        if (input.SystemType == "pas")
-            items = await CapturePasAsync(pasFactory, input, ct);
-        else
-            items = await CaptureSecretServerAsync(ssFactory, input, ct);
+        var items = input.SystemType switch
+        {
+            "pas" => await CapturePasAsync(pasFactory, input, ct),
+            "cyberark" => await CaptureCyberArkAsync(caFactory, input, ct),
+            _ => await CaptureSecretServerAsync(ssFactory, input, ct),
+        };
 
         // Summary counts for the snapshot.
         var summary = new
@@ -54,6 +59,9 @@ public sealed class InventoryService(IDbConnection db, IPasConnectorFactory pasF
             text_secrets = items.Count(i => i.ItemType == "text_secret"),
             file_secrets = items.Count(i => i.ItemType == "file_secret"),
             folders = items.Count(i => i.ItemType == "folder"),
+            // CyberArk only. Zero on a PAS or Secret Server snapshot.
+            safes = items.Count(i => i.ItemType == "safe"),
+            safe_members = items.Count(i => i.ItemType == "safe_member"),
             managed = items.Count(i => i is { ItemType: "account", IsManaged: true }),
             unmanaged = items.Count(i => i is { ItemType: "account", IsManaged: false }),
             // Multiplexed accounts have NO migration path - surfaced so they're visible pre-migration.
@@ -114,7 +122,8 @@ public sealed class InventoryService(IDbConnection db, IPasConnectorFactory pasF
         }
 
         return new InventoryRunResult(snapshotId, summary.total, summary.accounts,
-            summary.text_secrets, summary.file_secrets, summary.folders);
+            summary.text_secrets, summary.file_secrets, summary.folders,
+            summary.safes, summary.safe_members);
     }
 
     // ---- PAS capture ----
@@ -210,6 +219,137 @@ public sealed class InventoryService(IDbConnection db, IPasConnectorFactory pasF
         }
 
         return items;
+    }
+
+    // ---- CyberArk capture ----
+
+    /// <summary>
+    /// Read-only capture of a CyberArk vault: safes, the accounts inside them, and the safe
+    /// members with their raw permission switches.
+    ///
+    /// NO credential values are retrieved. Inventory deliberately does not call
+    /// Password/Retrieve — that happens only during a migration run, for accounts the operator
+    /// has selected. This keeps a discovery pass safe to run in a customer's production vault
+    /// (it also keeps it fast: retrieval is one API call per account and is what makes the
+    /// PowerShell export slow).
+    ///
+    /// Failures are NOT swallowed. If a safe cannot be enumerated the whole capture throws, so a
+    /// partial snapshot is never persisted looking complete — the trap the original export script
+    /// fell into, where a 429 mid-run produced a short CSV that reported success.
+    /// </summary>
+    private static async Task<List<InvItem>> CaptureCyberArkAsync(
+        ICyberArkConnectorFactory caFactory, RunInventoryInput input, CancellationToken ct)
+    {
+        var ca = caFactory.Create(input.BaseUrl!);
+        using var creds = new CyberArkCredentials
+        {
+            AuthMethod = CyberArkMigrationService.ParseAuthMethod(input.AuthMode),
+            Username = input.Username,
+            Password = input.ClientSecret,
+            ClientId = input.ClientId,
+            ClientSecret = input.ClientSecret,
+            IdentityTokenUrl = input.IdentityTokenUrl,
+        };
+        await ca.AuthenticateAsync(creds, ct);
+
+        try
+        {
+            var items = new List<InvItem>();
+            var safes = await ca.ListSafesAsync(ct);
+
+            foreach (var safe in safes)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                items.Add(new InvItem
+                {
+                    ItemType = "safe",
+                    NativeId = safe.SafeName,   // safe names are unique within a vault
+                    Name = safe.SafeName,
+                    FolderPath = null,
+                    Attributes = safe.Raw,
+                });
+
+                foreach (var acct in await ca.ListAccountsAsync(safe.SafeName, ct))
+                {
+                    var attrs = new Dictionary<string, object?>(acct.Raw)
+                    {
+                        ["safeName"] = acct.SafeName,
+                        ["platformId"] = acct.PlatformId,
+                        ["secretType"] = acct.SecretType,
+                        ["userName"] = acct.UserName,
+                        ["address"] = acct.Address,
+                        ["cpmStatus"] = acct.CpmStatus,
+                        // Resolved here so the pre-migration report can show the target template
+                        // without re-deriving it, and so a surprising mapping is visible before
+                        // anything is written.
+                        ["delineaTemplateName"] = CyberArkTemplateMap.Resolve(acct.PlatformId).TemplateName,
+                    };
+
+                    items.Add(new InvItem
+                    {
+                        ItemType = "account",
+                        NativeId = acct.Id,
+                        Name = acct.Name ?? acct.UserName,
+                        FolderPath = acct.SafeName,
+                        IsManaged = acct.CpmManaged,
+                        Attributes = attrs,
+                    });
+                }
+
+                foreach (var member in await ca.ListSafeMembersAsync(safe.SafeName, ct))
+                {
+                    // Built-ins are vault service identities. Excluded at capture so they never
+                    // reach a review screen or a permission run.
+                    if (CyberArkPermissionMapper.IsBuiltInMember(member.MemberName)) continue;
+
+                    var mapping = CyberArkPermissionMapper.Translate(member.Permissions);
+
+                    items.Add(new InvItem
+                    {
+                        ItemType = "safe_member",
+                        // Unique within the vault, and stable across runs so migration_item's
+                        // (engagement, type, source id) key makes re-runs idempotent.
+                        NativeId = $"{member.SafeName}|{member.MemberName}",
+                        Name = member.MemberName,
+                        FolderPath = member.SafeName,
+                        Attributes = new Dictionary<string, object?>
+                        {
+                            ["safeName"] = member.SafeName,
+                            ["memberName"] = member.MemberName,
+                            ["memberType"] = member.MemberType,
+                            ["memberId"] = member.MemberId,
+                            ["permissions"] = member.Permissions,
+                            // The translation is stored alongside the source so the pre-migration
+                            // review shows what WILL happen, and so the over-grant and
+                            // launcher-decision warnings are visible before anything is written.
+                            ["delineaFolderRole"] = mapping.FolderRole.ToApiString(),
+                            ["delineaSecretRole"] = mapping.SecretRole.ToApiString(),
+                            ["accessProfile"] = mapping.Profile,
+                            ["accessProfileKey"] = mapping.ProfileKey,
+                            ["rolePermissions"] = mapping.RolePermissions,
+                            ["withholdRolePermissions"] = mapping.WithholdRolePermissions,
+                            ["cyberArkGranted"] = mapping.Granted,
+                            ["overGrants"] = mapping.OverGrants,
+                            ["notes"] = mapping.Notes,
+                            ["unmapped"] = mapping.Unmapped,
+                            ["needsLauncherDecision"] = mapping.NeedsLauncherDecision,
+                            ["isApprover"] = mapping.Workflow.IsApprover,
+                            ["approvalLevel"] = mapping.Workflow.ApprovalLevel,
+                            ["bypassesApproval"] = mapping.Workflow.BypassesApproval,
+                        },
+                    });
+                }
+            }
+
+            return items;
+        }
+        finally
+        {
+            // Best effort: PVWA sessions count against the vault's concurrent-session limit, so
+            // an abandoned session after every inventory run is a real operational problem.
+            try { await ca.LogoffAsync(CancellationToken.None); } catch { /* best effort */ }
+        }
     }
 
     // ---- Secret Server capture ----
@@ -380,7 +520,7 @@ public sealed class InventoryService(IDbConnection db, IPasConnectorFactory pasF
 /// <summary>Run-inventory request. Credentials in-body, used in memory, never stored.</summary>
 public sealed record RunInventoryInput(
     string Role,            // source | target
-    string SystemType,      // pas | secret_server
+    string SystemType,      // pas | cyberark | secret_server
     string AuthMode,
     string? BaseUrl,
     string? PlatformBaseUrl,
@@ -389,7 +529,10 @@ public sealed record RunInventoryInput(
     string ClientId,
     string ClientSecret,
     string? Username,
-    string? Scope);
+    string? Scope,
+    string? IdentityTokenUrl = null);   // CyberArk Privilege Cloud only
 
 public sealed record InventoryRunResult(
-    Guid SnapshotId, int Total, int Accounts, int TextSecrets, int FileSecrets, int Folders);
+    Guid SnapshotId, int Total, int Accounts, int TextSecrets, int FileSecrets, int Folders,
+    // CyberArk only; zero for the other source types.
+    int Safes = 0, int SafeMembers = 0);
